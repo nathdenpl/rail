@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>FR - Horaires Gare</title>
+  <link rel="icon" href="../Logos FR/favicon.ico" type="image/svg+xml">
+  <link rel="icon" href="../Logos FR/favicon.ico" sizes="any">
+  <link rel="stylesheet" href="../Accueil/accueil.css" />
+  <link rel="stylesheet" href="horairesgare.css" />
+  <script src="horairesgare.js" defer></script>
+</head>
+<body>
+  <header class="topHeader">
+    <div class="topHeader__inner">
+      <a class="brand" href="../Accueil/accueil.html">
+        <img class="brand__logo" src="../Logos FR/fr.png" alt="FR" />
+        <span class="brand__name">FR</span>
+      </a>
+
+      <nav class="nav">
+        <a href="../Accueil/accueil.html#offers">Offres</a>
+        <a href="../Accueil/accueil.html#destinations">Destinations</a>
+        <a href="../Horaires/horaires.html">Horaires</a>
+        <a href="../HorairesGare/horairesgare.html">Horaires gare</a>
+        <a href="../Cartes/cartes.html">Cartes</a>
+        <a href="../Accueil/accueil.html#help">Aide</a>
+        <button class="nav__cta" type="button"
+          onclick="document.querySelector('#planner').scrollIntoView({behavior:'smooth'})">
+          Rechercher un trajet
+        </button>
+      </nav>
+
+      <button id="menuBtn" class="menuBtn" type="button" aria-label="Ouvrir le menu" aria-expanded="false" aria-controls="mobileMenu">
+        <span></span><span></span><span></span>
+      </button>
+    </div>
+
+    <div class="skew skew--blue"></div>
+    <div class="skew skew--red"></div>
+  </header>
+
+  <aside id="mobileMenu" class="mobileMenu" hidden>
+    <div class="mobileMenu__inner">
+      <div class="mobileMenu__top">
+        <div class="mobileMenu__title">Menu FR</div>
+        <div class="mobileMenu__sub">Navigation rapide</div>
+      </div>
+
+      <div class="mobileMenu__grid">
+        <section class="mobileMenu__col">
+          <h3>Voyager</h3>
+          <a href="../Horaires/horaires.html">Horaires</a>
+          <a href="../HorairesGare/horairesgare.html">Horaires gare</a>
+          <a href="../Cartes/cartes.html">Cartes</a>
+          <a href="../Accueil/accueil.html#offers">Offres</a>
+        </section>
+
+        <section class="mobileMenu__col">
+          <h3>Découvrir</h3>
+          <a href="../Accueil/accueil.html#destinations">Destinations</a>
+          <a href="../Accueil/accueil.html#help">Aide</a>
+          <a href="../Accueil/accueil.html">Accueil</a>
+        </section>
+      </div>
+
+      <div class="mobileMenu__foot">
+        <a class="mobileMenu__cta" href="#planner">Rechercher un trajet</a>
+      </div>
+    </div>
+  </aside>
+
+  <main class="page" id="planner">
+    <section class="hero">
+      <div class="hero__bg" aria-hidden="true"></div>
+
+      <div class="hero__inner">
+        <div class="hero__copy">
+          <p class="hero__kicker">Horaires par gare</p>
+          <h1 class="hero__title">Tous les prochains départs et arrivées.</h1>
+          <p class="hero__lead">Choisis une gare puis bascule entre les départs et les arrivées à venir.</p>
+        </div>
+
+        <section class="searchCard searchCard--hero">
+          <div class="searchTop">
+            <div class="brandRow">
+              <img class="brandLogo" src="../Logos FR/fr.png" alt="FR"/>
+              <div class="brandTitles">
+                <h2>Horaires Gare</h2>
+                <p>Un seul champ, toutes les prochaines relations</p>
+              </div>
+            </div>
+          </div>
+
+          <div class="searchGridOne">
+            <label class="lbl">
+              Gare
+              <div class="field">
+                <input id="station" placeholder="Ex: Sion" autocomplete="off" />
+              </div>
+            </label>
+
+            <button id="searchBtn" class="btn" type="button">Afficher</button>
+          </div>
+
+          <div class="searchBottom">
+            <div class="searchMeta">
+              <button id="dateBtn" class="metaBtn" type="button" aria-haspopup="dialog" aria-controls="dateOverlay">
+                <span class="metaIcon" aria-hidden="true">📅</span>
+                <span class="metaLabel" id="dateBtnLabel">Aujourd'hui</span>
+              </button>
+
+              <input id="mockDate" type="date" class="srOnlyInput" tabindex="-1" aria-hidden="true" />
+              <span class="hint">Limite: -14 jours / +6 mois</span>
+            </div>
+
+            <div class="modeToggle" id="modeToggle" role="tablist" aria-label="Mode d'affichage">
+              <div class="modeToggle__thumb" aria-hidden="true"></div>
+              <button class="modeToggle__btn is-active" id="modeDepartures" data-mode="departures" type="button" role="tab" aria-selected="true">Départs</button>
+              <button class="modeToggle__btn" id="modeArrivals" data-mode="arrivals" type="button" role="tab" aria-selected="false">Arrivées</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <section class="section" id="resultsSection">
+      <div class="section__head">
+        <h2 id="resultTitle">Prochains départs</h2>
+        <p id="status">Choisis une gare pour afficher les prochains mouvements.</p>
+      </div>
+
+      <section class="results" id="results"></section>
+
+      <div class="dayNav" id="dayNav">
+        <button id="dayPrevBtn" class="dayNavBtn" type="button">← Jour précédent</button>
+        <button id="dayNextBtn" class="dayNavBtn" type="button">Jour suivant →</button>
+      </div>
+    </section>
+
+    <footer class="footer">
+      <div>© FR — Portfolio temporaire</div>
+    </footer>
+  </main>
+
+  <div id="modalOverlay" class="modalOverlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+      <button class="modalClose" id="modalCloseBtn" type="button" aria-label="Fermer">×</button>
+      <div class="modalHeader">
+        <div class="modalTitle" id="modalTitle"></div>
+        <div class="modalSub" id="modalSub"></div>
+      </div>
+      <div class="modalBody" id="modalBody"></div>
+    </div>
+  </div>
+
+  <div id="stationOverlay" class="stationOverlay" hidden>
+    <div class="stationSheet" role="dialog" aria-modal="true" aria-labelledby="stationTitle">
+      <header class="stationTop">
+        <button id="stationCloseBtn" class="stationClose" type="button" aria-label="Fermer">×</button>
+        <div class="stationTitles">
+          <div class="stationTitle" id="stationTitle">Choisir une gare</div>
+          <div class="stationSub">Tape pour filtrer ou choisis dans la liste</div>
+        </div>
+      </header>
+
+      <div class="stationSearch">
+        <input id="stationSearchInput" type="text" placeholder="Rechercher une gare..." autocomplete="off" />
+        <div class="stationHint" id="stationHint"></div>
+      </div>
+
+      <div class="stationList" id="stationList"></div>
+    </div>
+  </div>
+
+  <div id="dateOverlay" class="dateOverlay" hidden>
+    <div class="dateSheet" role="dialog" aria-modal="true" aria-labelledby="dateTitle">
+      <header class="dateTop">
+        <div class="dateTitles">
+          <div class="dateTitle" id="dateTitle">Sélectionner une date</div>
+          <div class="dateSub">Affichage des mouvements pour le jour choisi</div>
+        </div>
+        <button id="dateCloseBtn" class="dateClose" type="button" aria-label="Annuler">Annuler</button>
+      </header>
+
+      <div class="dateQuick" role="group" aria-label="Raccourcis">
+        <button class="quickBtn" type="button" data-quick="today">Aujourd'hui</button>
+        <button class="quickBtn" type="button" data-quick="tomorrow">Demain</button>
+        <button class="quickBtn" type="button" data-quick="after">Après-demain</button>
+      </div>
+
+      <div class="datePickers">
+        <label class="dateLbl">
+          Jour
+          <select id="dateDaySelect" class="dateSelect"></select>
+        </label>
+
+        <label class="dateLbl">
+          Mois
+          <select id="dateMonthSelect" class="dateSelect"></select>
+        </label>
+      </div>
+
+      <div class="dateActions">
+        <button id="dateApplyBtn" class="btn" type="button">Choisir la date</button>
+      </div>
+    </div>
+  </div>
+</body>
+</html>
