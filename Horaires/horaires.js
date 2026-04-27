@@ -1,0 +1,3350 @@
+"use strict";
+
+/* ============================
+   CONFIG
+   ============================ */
+const MIN_TRANSFER_MINUTES = 3;
+
+// "Alternatives" (si un direct existe) — tu peux ajuster
+const ALLOW_ALTERNATIVES_WITH_DIRECT = true;
+const MAX_WAIT_FOR_ALTERNATIVE = 12; // minutes
+const MAX_EXTRA_ARRIVAL = 20;        // minutes
+const MAX_ALTERNATIVES_TO_KEEP = 2;  // nb max alternatives gardées
+const MAX_CHANGES = 3;               // nb max de correspondances à chercher
+const MAX_WAIT_FOR_TRANSFER = 180;   // minutes max d'attente à une correspondance
+
+// Classe de gares (pour le ranking correspondances)
+const ALLOWED_TRANSFER_CLASSES = new Set([1, 2]); // 1 et 2 seulement
+
+/* ============================
+   STATE
+   ============================ */
+let routes = [];
+let routesAll = [];
+let stationsAll = [];
+let lastRenderedTrips = [];      // trips actuellement affichés (main list)
+let lastSearchContext = { from: "", to: "", mode: "home" }; // mode: "home" | "search"
+// Référence temporelle de la dernière recherche (date + heure)
+let lastQueryRef = { selDate: null, nowMin: null, isToday: true };
+let liveRAF = null;
+let stationsIndex = []; // [{ name, key, compact }]
+let routesByStation = new Map(); // stationLower -> [{ route, index }]
+let legsByFrom = new Map(); // stationLower -> [leg]
+let legsIndexBuilt = false;
+let stationPickerOpen = false;
+let stationPickerTarget = null; // inputEl cible (from/to)
+/* ===== modal state ===== */
+let modalOpen = false;
+let modalTrip = null;
+let modalFrom = "";
+let modalTo = "";
+let modalGeom = null; // { x, yStart, yEnd }
+let lastPastTrips = []; // pour que le modal marche aussi sur les relations passées
+let modalTab = "overview"; // "overview" | "leg1" | "leg2"
+
+/* ============================
+   DOM
+   ============================ */
+const $ = (id) => document.getElementById(id);
+
+function refreshOverlayBodyClass(){
+  const st = document.getElementById("stationOverlay");
+  const dt = document.getElementById("dateOverlay");
+  const mm = document.getElementById("mobileMenu");
+  const open = (st && !st.hidden) || (dt && !dt.hidden) || (mm && !mm.hidden);
+  document.body.classList.toggle("overlay-open", !!open);
+}
+
+function initHeaderMenu(){
+  const btn = $("menuBtn");
+  const menu = $("mobileMenu");
+  if(!btn || !menu) return;
+
+  function closeMenu(){
+    menu.setAttribute("hidden", "");
+    btn.classList.remove("is-open");
+    btn.setAttribute("aria-expanded", "false");
+    refreshOverlayBodyClass();
+  }
+
+  btn.addEventListener("click", ()=>{
+    const opening = menu.hasAttribute("hidden");
+    if(opening) menu.removeAttribute("hidden");
+    else menu.setAttribute("hidden", "");
+    btn.classList.toggle("is-open", opening);
+    btn.setAttribute("aria-expanded", String(opening));
+    refreshOverlayBodyClass();
+  });
+
+  menu.querySelectorAll("a").forEach((a)=>{
+    a.addEventListener("click", closeMenu);
+  });
+
+  document.addEventListener("mousedown", (e)=>{
+    if(menu.hasAttribute("hidden")) return;
+    if(menu.contains(e.target) || btn.contains(e.target)) return;
+    closeMenu();
+  });
+
+  document.addEventListener("keydown", (e)=>{
+    if(e.key !== "Escape") return;
+    if(menu.hasAttribute("hidden")) return;
+    closeMenu();
+  });
+}
+
+/* ============================
+   UTILS
+   ============================ */
+function escapeHtml(str){
+  return String(str ?? "")
+    .replaceAll("&","&amp;")
+    .replaceAll("<","&lt;")
+    .replaceAll(">","&gt;")
+    .replaceAll('"',"&quot;")
+    .replaceAll("'","&#039;");
+}
+
+function normalizeKey(s){ return String(s || "").trim().toLowerCase(); }
+
+// ============
+// FUZZY station matching
+// ============
+
+// enlève les accents: É -> E, à -> a, etc.
+function stripDiacritics(s){
+  return String(s || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "");
+}
+
+// normalise pour la recherche station (accents, St, ponctuation)
+function normalizeStationQuery(s){
+  let x = stripDiacritics(String(s || "").trim().toLowerCase());
+
+  // séparateurs -> espaces
+  x = x.replace(/[-'’.,()/]/g, " ");
+
+  // collapse spaces
+  x = x.replace(/\s+/g, " ").trim();
+
+  // "st" -> "saint" (token seul)
+  // ex: "st maurice" / "st-maurice"
+  x = x.replace(/\bst\b/g, "saint");
+
+  // "pt" -> "pont" (token seul)
+  // ex: "pt st martin" / "pt-st-martin"
+  x = x.replace(/\bpt\b/g, "pont");
+
+  return x;
+}
+
+// version "compact" (ignore espaces)
+function compactKey(s){
+  return String(s || "").replace(/\s+/g, "");
+}
+
+function stationAbbrevCompact(key){
+  return compactKey(
+    String(key || "")
+      .replace(/\bsaint\b/g, "st")
+      .replace(/\bpont\b/g, "pt")
+  );
+}
+
+function maxTypoDistance(queryLen, candidateLen){
+  const q = Number(queryLen) || 0;
+  const c = Number(candidateLen) || 0;
+  const minLen = Math.min(q, c);
+  if(minLen < 5) return 0;
+  if(minLen < 8) return 1;
+  return 2;
+}
+
+// petite distance d’édition (typos)
+function levenshtein(a,b){
+  a = String(a || ""); b = String(b || "");
+  const n = a.length, m = b.length;
+  if(n === 0) return m;
+  if(m === 0) return n;
+
+  const dp = new Array(m + 1);
+  for(let j=0;j<=m;j++) dp[j] = j;
+
+  for(let i=1;i<=n;i++){
+    let prev = dp[0];
+    dp[0] = i;
+    for(let j=1;j<=m;j++){
+      const tmp = dp[j];
+      const cost = (a[i-1] === b[j-1]) ? 0 : 1;
+      dp[j] = Math.min(
+        dp[j] + 1,      // del
+        dp[j-1] + 1,    // ins
+        prev + cost     // sub
+      );
+      prev = tmp;
+    }
+  }
+  return dp[m];
+}
+
+function displayTime(t){
+  if(!t) return "—";
+  const parts = String(t).trim().split(":");
+  if(parts.length !== 2) return String(t);
+  const h = parseInt(parts[0], 10);
+  const m = String(parseInt(parts[1], 10)).padStart(2, "0");
+  if(Number.isNaN(h) || Number.isNaN(parseInt(m,10))) return String(t);
+  return `${h}:${m}`; // PAS de 0 devant les heures
+}
+
+function toMinutes(t){
+  if(!t) return null;
+  const parts = String(t).trim().split(":");
+  if(parts.length !== 2) return null;
+  const h = parseInt(parts[0], 10);
+  const m = parseInt(parts[1], 10);
+  if(Number.isNaN(h) || Number.isNaN(m)) return null;
+  return h * 60 + m;
+}
+
+function toSeconds(t){
+  const m = toMinutes(t);
+  return (m == null) ? null : m * 60;
+}
+
+function depArrMins(dep, arr){
+  const depMin = toMinutes(dep);
+  let arrMin = toMinutes(arr);
+  if(depMin == null || arrMin == null) return { depMin, arrMin };
+  if(arrMin < depMin) arrMin += 1440;
+  return { depMin, arrMin };
+}
+
+/* ============================
+   Time helpers (midnight-safe)
+   - Unwrap times so they are non-decreasing along a route:
+     23:00 -> 01:00 becomes 1380 -> 1500
+   ============================ */
+const __unwrapCache = new Map(); // route.id -> { stops:[{arrU,depU}], arrAt(i), depAt(i) }
+
+function unwrapRouteTimes(route){
+  if(!route) return null;
+  const key = String(route.id ?? "");
+  if(__unwrapCache.has(key)) return __unwrapCache.get(key);
+
+  const sched = Array.isArray(route.schedule) ? route.schedule : [];
+  const stops = new Array(sched.length);
+
+  let dayOffset = 0;
+  let last = null;
+
+  function unwrapOne(raw){
+    if(!raw) return null;
+    const m = toMinutes(raw);
+    if(m == null) return null;
+
+    let u = m + dayOffset;
+    if(last != null && u < last){
+      dayOffset += 1440;
+      u = m + dayOffset;
+    }
+    last = u;
+    return u;
+  }
+
+  for(let i=0;i<sched.length;i++){
+    const s = sched[i] || {};
+    // ordre chronologique: arrivée puis départ
+    const arrU = unwrapOne(s.arr);
+    const depU = unwrapOne(s.dep);
+    stops[i] = { arrU, depU };
+  }
+
+  function arrAt(i){
+    const x = stops[i];
+    if(!x) return null;
+    return (x.arrU != null) ? x.arrU : x.depU;
+  }
+  function depAt(i){
+    const x = stops[i];
+    if(!x) return null;
+    return (x.depU != null) ? x.depU : x.arrU;
+  }
+
+  const out = { stops, arrAt, depAt };
+  __unwrapCache.set(key, out);
+  return out;
+}
+
+function diffAcrossMidnight(startMin, endMin){
+  if(startMin == null || endMin == null) return null;
+  let d = endMin - startMin;
+  if(d < 0) d += 1440;
+  return d;
+}
+
+function clamp(n,a,b){ return Math.max(a, Math.min(b, n)); }
+function minutesToHuman(min){
+  if(min == null || !Number.isFinite(min)) return "";
+  const h = Math.floor(min / 60);
+  const m = min % 60;
+  if(h <= 0) return `${m} min`;
+  return `${h} h ${m} min`;
+}
+
+function serviceClassSuffix(code){
+  const first = String(code || "").split("→")[0].trim().toUpperCase();
+  if(first.startsWith("IR")) return "ir";
+  if(first.startsWith("IC")) return "ic";
+  if(first.startsWith("RE")) return "re";
+  return "";
+}
+
+const PARIS_TZ = "Europe/Paris";
+
+function parisNowParts(date = new Date()){
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: PARIS_TZ,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23"
+  }).formatToParts(date);
+
+  const get = (type) => Number(parts.find(p => p.type === type)?.value);
+  return {
+    year: get("year"),
+    month: get("month"),
+    day: get("day"),
+    hour: get("hour"),
+    minute: get("minute"),
+    second: get("second")
+  };
+}
+
+function dateUTCFromYmd(y, m, d){
+  return new Date(Date.UTC(y, m - 1, d, 0, 0, 0, 0));
+}
+
+function formatIsoUTC(d){
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const da = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${da}`;
+}
+
+function parisTodayUTC(){
+  const p = parisNowParts();
+  return dateUTCFromYmd(p.year, p.month, p.day);
+}
+
+function formatDateFrParis(d){
+  return new Intl.DateTimeFormat("fr-FR", { timeZone: PARIS_TZ }).format(d);
+}
+
+/* ============================
+   Date helpers (recherche datée)
+   ============================ */
+function parseLocalDate(yyyyMmDd){
+  const s = String(yyyyMmDd||"").trim();
+  if(!s) return null;
+  const m = /^\s*(\d{4})-(\d{2})-(\d{2})\s*$/.exec(s);
+  if(!m) return null;
+  const y = parseInt(m[1],10);
+  const mo = parseInt(m[2],10);
+  const d = parseInt(m[3],10);
+  if([y,mo,d].some(Number.isNaN)) return null;
+  const out = dateUTCFromYmd(y, mo, d);
+  if(
+    out.getUTCFullYear() !== y ||
+    out.getUTCMonth() !== (mo - 1) ||
+    out.getUTCDate() !== d
+  ){
+    return null;
+  }
+  return out;
+}
+
+function isSameLocalDay(a,b){
+  if(!a || !b) return false;
+  return (
+    a.getUTCFullYear()===b.getUTCFullYear() &&
+    a.getUTCMonth()===b.getUTCMonth() &&
+    a.getUTCDate()===b.getUTCDate()
+  );
+}
+
+function addMonthsLocal(date, months){
+  const d = new Date(date.getTime());
+  const day = d.getUTCDate();
+  d.setUTCMonth(d.getUTCMonth() + months);
+  // JS peut déborder (ex: 31 -> mois plus court). On re-clamp au dernier jour du mois.
+  if(d.getUTCDate() !== day){
+    d.setUTCDate(0); // dernier jour du mois précédent
+  }
+  d.setUTCHours(0,0,0,0);
+  return d;
+}
+
+function queryReference(){
+  const md = $("mockDate");
+  const mt = $("mockTime");
+
+  const parisNow = parisNowParts();
+  const today0 = dateUTCFromYmd(parisNow.year, parisNow.month, parisNow.day);
+
+  const selDate = (md && String(md.value||"").trim()) ? parseLocalDate(md.value) : today0;
+  const isToday = isSameLocalDay(selDate, today0);
+
+  let nowMin;
+  if(mt && String(mt.value||"").trim()){
+    const m = toMinutes(mt.value);
+    nowMin = (m == null) ? 0 : m;
+  } else {
+    nowMin = isToday ? (parisNow.hour*60 + parisNow.minute) : 0;
+  }
+
+  return { selDate, today0, nowMin, isToday };
+}
+
+function nowSeconds(){
+  // Si on a choisi une date différente d'aujourd'hui, on désactive le live.
+  const md = $("mockDate");
+  if(md && String(md.value||"").trim()){
+    const sel = parseLocalDate(md.value);
+    if(sel && !isSameLocalDay(sel, parisTodayUTC())) return -1e12;
+  }
+
+  const mt = $("mockTime");
+  if(mt && String(mt.value||"").trim()){
+    // mockTime n’a pas de secondes → on garde pile à la minute
+    const m = toMinutes(mt.value);
+    if(m != null) return m * 60;
+  }
+
+  const d = new Date();
+  const p = parisNowParts(d);
+  return (
+    p.hour*3600 +
+    p.minute*60 +
+    p.second +
+    d.getMilliseconds()/1000
+  );
+}
+
+function uniqueCaseInsensitive(list){
+  const seen = new Set();
+  const out = [];
+  for(const s of list){
+    const k = normalizeKey(s);
+    if(!k) continue;
+    if(!seen.has(k)){
+      seen.add(k);
+      out.push(String(s).trim());
+    }
+  }
+  return out;
+}
+
+/* ============================
+   Station classes (ranking correspondances)
+   ============================ */
+function stationClass(name){
+  const n = normalizeKey(name);
+  if(n === "brigue" || n === "sion") return 1;
+  if(n === "loèche-les-bains" || n === "loeche-les-bains" || n === "saint-maurice") return 3;
+  return 2;
+}
+
+
+/* ============================
+   Terminus (Direction)
+   -> terminus du PREMIER train
+   ============================ */
+function trainTerminus(route){
+  if(!route || !Array.isArray(route.schedule) || route.schedule.length === 0) return "";
+  return route.schedule[route.schedule.length - 1].station || "";
+}
+
+/* ============================
+   LOAD routes.json
+   ============================ */
+async function loadRoutes(){
+  const [routesRes, garesRes] = await Promise.all([
+    fetch("../routes.json", { cache:"no-store" }),
+    fetch("../gares.json", { cache:"no-store" }).catch(() => null)
+  ]);
+  if(!routesRes.ok) throw new Error("Impossible de charger routes.json (utilise Go Live).");
+  const data = await routesRes.json();
+  const garesData = (garesRes && garesRes.ok) ? await garesRes.json() : null;
+
+  routesAll = (Array.isArray(data.routes) ? data.routes : []).map(r => ({
+    id: String(r.id ?? ""),
+    line: String(r.line ?? ""),
+    name: String(r.name ?? ""),
+    effectiveFrom: r.effectiveFrom ? String(r.effectiveFrom) : null,
+    effectiveTo: r.effectiveTo ? String(r.effectiveTo) : null,
+    schedule: Array.isArray(r.schedule) ? r.schedule.map(s => ({
+      station: String(s.station ?? "").trim(),
+      arr: s.arr ? String(s.arr) : null,
+      dep: s.dep ? String(s.dep) : null,
+      voie: (s.Voie ?? s.voie) == null || (s.Voie ?? s.voie) === "" ? null : String(s.Voie ?? s.voie)
+    })) : []
+  }));
+
+  const all = [];
+  const garesList = Array.isArray(garesData?.gares) ? garesData.gares : [];
+  for(const g of garesList){
+    const name = String(g?.name ?? g ?? "").trim();
+    if(name) all.push(name);
+  }
+  for(const r of routesAll){
+    for(const s of r.schedule){
+      if(s.station) all.push(s.station);
+    }
+  }
+  stationsAll = uniqueCaseInsensitive(all).sort((a,b)=>a.localeCompare(b, "fr", { sensitivity:"base" }));
+  stationsIndex = stationsAll.map(name=>{
+    const key = normalizeStationQuery(name);
+    return { name, key, compact: compactKey(key), abbrevCompact: stationAbbrevCompact(key) };
+  });
+
+  applyEffectiveRoutes(parseLocalDate($("mockDate")?.value) || new Date());
+}
+
+function routeActiveOnDate(route, selDate){
+  function keyOfDate(d){
+    if(!d) return null;
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth()+1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  const day = (selDate instanceof Date)
+    ? selDate
+    : (typeof selDate === "string" ? parseLocalDate(selDate) : new Date());
+  const dayKey = keyOfDate(day) || keyOfDate(new Date());
+
+  // Comparaison en "YYYY-MM-DD" (locale-safe, inclusive, sans effet fuseau).
+  const fromKey = route.effectiveFrom ? String(route.effectiveFrom).trim() : null;
+  const toKey = route.effectiveTo ? String(route.effectiveTo).trim() : null;
+  if(fromKey && dayKey < fromKey) return false;
+  if(toKey && dayKey > toKey) return false;
+  return true;
+}
+
+function rebuildRoutesIndexes(){
+  routesByStation = new Map();
+  for(const r of routes){
+    const sched = r.schedule || [];
+    for(let i=0;i<sched.length;i++){
+      const st = sched[i].station;
+      if(!st) continue;
+      const k = normalizeKey(st);
+      if(!routesByStation.has(k)) routesByStation.set(k, []);
+      routesByStation.get(k).push({ route: r, index: i });
+    }
+  }
+  legsIndexBuilt = false;
+  __unwrapCache.clear();
+}
+
+function applyEffectiveRoutes(selDate){
+  const day = selDate ? new Date(selDate.getFullYear(), selDate.getMonth(), selDate.getDate(), 0,0,0,0) : new Date();
+  routes = routesAll.filter(r => routeActiveOnDate(r, day));
+  rebuildRoutesIndexes();
+}
+
+/* ============================
+   SUGGESTIONS
+   ============================ */
+function filterStations(query){
+  const raw = String(query || "").trim();
+  if(!raw) return stationsAll.slice(0, 10);
+
+  const q = normalizeStationQuery(raw);
+  const qc = compactKey(q);
+  if(!q) return stationsAll.slice(0, 10);
+
+  const scored = [];
+
+  for(const st of stationsIndex){
+    const k = st.key;
+    const kc = st.compact;
+    const ka = st.abbrevCompact;
+
+    let score = 0;
+
+    // très fort
+    if(k === q || kc === qc || ka === qc) score = 1000;
+    else if(k.startsWith(q) || kc.startsWith(qc) || ka.startsWith(qc)) score = 900;
+    else if(k.includes(q) || kc.includes(qc) || ka.includes(qc)) score = 800;
+    else {
+      // typo tolérée seulement sur requêtes suffisamment longues
+      const maxD = maxTypoDistance(qc.length, kc.length);
+      if(maxD > 0){
+        const d = levenshtein(qc, kc);
+        const da = levenshtein(qc, ka);
+        const best = Math.min(d, da);
+        if(best <= maxD) score = 650 - best*60; // d=1 meilleur que d=2
+      }
+    }
+
+    if(score > 0) scored.push({ name: st.name, score });
+  }
+
+  scored.sort((a,b)=> b.score - a.score || a.name.localeCompare(b.name, "fr", { sensitivity:"base" }));
+  return scored.slice(0, 10).map(x=>x.name);
+}
+
+function bestStationGuess(raw){
+  const q = String(raw || "").trim();
+  if(!q) return null;
+
+  const suggestions = filterStations(q);
+  if(!suggestions.length) return null;
+
+  const best = suggestions[0];
+
+  // Heuristique "confiance" : on corrige si c'est clairement le match attendu
+  const qn = compactKey(normalizeStationQuery(q));
+  const bObj = stationsIndex.find(x => x.name === best);
+  if(!bObj) return best;
+
+  if(bObj.compact === qn || bObj.abbrevCompact === qn) return best; // exact
+  if(bObj.compact.startsWith(qn) || bObj.abbrevCompact.startsWith(qn)) return best; // préfixe très sûr
+  if((bObj.compact.includes(qn) || bObj.abbrevCompact.includes(qn)) && qn.length >= 4) return best; // contient
+
+  const maxD = maxTypoDistance(qn.length, bObj.compact.length);
+  if(maxD > 0){
+    const d = Math.min(
+      levenshtein(qn, bObj.compact),
+      levenshtein(qn, bObj.abbrevCompact)
+    );
+    if(d <= maxD) return best;           // typo plausible
+  }
+
+  return null;
+}
+
+function renderSuggest(boxEl, items){
+  if(!items.length){
+    boxEl.classList.remove("open");
+    boxEl.innerHTML = "";
+    return;
+  }
+  boxEl.innerHTML = items.map(st => `
+    <div class="suggestItem" data-value="${escapeHtml(st)}">${escapeHtml(st)}</div>
+  `).join("");
+  boxEl.classList.add("open");
+}
+
+function closeSuggest(boxEl){
+  boxEl.classList.remove("open");
+  boxEl.innerHTML = "";
+}
+
+/* ============================
+   STATION PICKER (plein écran)
+   ============================ */
+
+function openStationPicker(targetInput){
+  stationPickerTarget = targetInput;
+  stationPickerOpen = true;
+
+  const overlay = $("stationOverlay");
+  const search = $("stationSearchInput");
+  if(!overlay || !search) return;
+
+  overlay.hidden = false;
+  refreshOverlayBodyClass();
+  document.body.classList.add("modalOpen");
+
+  // on pré-remplit avec ce que l'user avait dans le champ
+  search.value = targetInput.value || "";
+  renderStationList(search.value);
+
+  setTimeout(()=>search.focus(), 0);
+}
+
+function closeStationPicker(){
+  stationPickerOpen = false;
+  stationPickerTarget = null;
+
+  const overlay = $("stationOverlay");
+  if(overlay) overlay.hidden = true;
+
+  refreshOverlayBodyClass();
+
+  document.body.classList.remove("modalOpen");
+}
+
+function groupByFirstLetter(names){
+  const groups = new Map();
+  for(const n of names){
+    const ch = (n[0] || "#").toUpperCase();
+    if(!groups.has(ch)) groups.set(ch, []);
+    groups.get(ch).push(n);
+  }
+  return Array.from(groups.entries()).sort((a,b)=>a[0].localeCompare(b[0], "fr"));
+}
+
+function renderStationList(filterText){
+  const listEl = $("stationList");
+  const hintEl = $("stationHint");
+  if(!listEl) return;
+
+  const q = String(filterText || "").trim();
+
+  let items = stationsAll;
+
+  if(q){
+    // même logique que le best guess: inclut les abréviations compactes (pt/st)
+    items = filterStations(q);
+
+    const guess = bestStationGuess(q);
+    if(hintEl) hintEl.textContent = guess ? `Entrée = valider “${guess}”` : "";
+  } else {
+    if(hintEl) hintEl.textContent = "";
+  }
+
+  const grouped = groupByFirstLetter(items);
+
+  listEl.innerHTML = grouped.map(([letter, arr])=>{
+    return `
+      <div class="stationSection">${escapeHtml(letter)}</div>
+      ${arr.map(name => `
+        <div class="stationItem" data-station="${escapeHtml(name)}">
+          <span>${escapeHtml(name)}</span>
+        </div>
+      `).join("")}
+    `;
+  }).join("");
+
+  listEl.querySelectorAll(".stationItem").forEach(el=>{
+    el.addEventListener("click", ()=>{
+      const st = el.dataset.station;
+      if(!st || !stationPickerTarget) return;
+      stationPickerTarget.value = st;
+      closeStationPicker();
+    });
+  });
+}
+
+function bindSuggest(inputEl, boxEl){
+  inputEl.addEventListener("input", ()=>renderSuggest(boxEl, filterStations(inputEl.value)));
+  inputEl.addEventListener("focus", ()=>renderSuggest(boxEl, filterStations(inputEl.value)));
+
+  function applyBestGuess(){
+    const guess = bestStationGuess(inputEl.value);
+    if(guess){
+      inputEl.value = guess;
+    }
+    closeSuggest(boxEl);
+  }
+
+  // Entrée => applique le meilleur guess + ferme suggestions
+  inputEl.addEventListener("keydown", (e)=>{
+    if(e.key === "Enter"){
+      e.preventDefault();
+      applyBestGuess();
+    }
+  });
+
+  // Clique ailleurs / blur => applique le meilleur guess
+  inputEl.addEventListener("blur", ()=>{
+    // petit timeout pour ne pas gêner le click sur une suggestion
+    setTimeout(applyBestGuess, 0);
+  });
+
+  boxEl.addEventListener("mousedown", (e)=>{
+    const item = e.target.closest(".suggestItem");
+    if(!item) return;
+    inputEl.value = item.dataset.value;
+    closeSuggest(boxEl);
+  });
+
+  document.addEventListener("mousedown", (e)=>{
+    if(e.target === inputEl) return;
+    if(boxEl.contains(e.target)) return;
+    closeSuggest(boxEl);
+  });
+}
+
+// expose for other overlays
+window.__fr_closeStationPicker = closeStationPicker;
+
+
+/* ============================
+   ROUTE helpers / segments
+   ============================ */
+function stationIndex(route, stationLower){
+  const sched = route.schedule || [];
+  for(let i=0;i<sched.length;i++){
+    if(normalizeKey(sched[i].station) === stationLower) return i;
+  }
+  return -1;
+}
+
+function timeAtStopForArr(route, index){
+  const s = (route.schedule || [])[index];
+  return s ? (s.arr || s.dep || null) : null;
+}
+function timeAtStopForDep(route, index){
+  const s = (route.schedule || [])[index];
+  return s ? (s.dep || s.arr || null) : null;
+}
+
+function segment(route, fromLower, toLower){
+  const iFrom = stationIndex(route, fromLower);
+  const iTo = stationIndex(route, toLower);
+  if(iFrom === -1 || iTo === -1 || iFrom >= iTo) return null;
+
+  const sched = route.schedule;
+  const stopFrom = sched[iFrom];
+  const stopTo = sched[iTo];
+
+  const depFrom = stopFrom.dep || stopFrom.arr;
+  const arrTo = stopTo.arr || stopTo.dep;
+
+  const uw = unwrapRouteTimes(route);
+  return {
+    route,
+    iFrom, iTo,
+    depFrom,
+    arrTo,
+    // ✅ minutes "dépliées" (peuvent dépasser 24h si le train passe minuit)
+    depFromMin: uw ? uw.depAt(iFrom) : toMinutes(depFrom),
+    arrToMin:   uw ? uw.arrAt(iTo)   : toMinutes(arrTo)
+  };
+}
+
+/* ============================
+   Legs index (for multi-change search)
+   ============================ */
+function buildLegsIndex(){
+  if(legsIndexBuilt) return;
+  legsIndexBuilt = true;
+  legsByFrom = new Map();
+
+  for(const r of routes){
+    const sched = r.schedule || [];
+    for(let i=0;i<sched.length-1;i++){
+      const fromStation = sched[i].station;
+      const fromLower = normalizeKey(fromStation);
+      if(!fromLower) continue;
+
+      const depT = timeAtStopForDep(r, i);
+      const depMin = toMinutes(depT);
+      if(depMin == null) continue;
+
+      for(let j=i+1;j<sched.length;j++){
+        const toStation = sched[j].station;
+        const toLower = normalizeKey(toStation);
+        if(!toLower) continue;
+
+        const arrT = timeAtStopForArr(r, j);
+        const arrMin = toMinutes(arrT);
+        const durationMin = diffAcrossMidnight(depMin, arrMin);
+        if(durationMin == null) continue;
+
+        const leg = {
+          route: r,
+          iFrom: i,
+          iTo: j,
+          from: fromStation,
+          to: toStation,
+          dep: depT,
+          arr: arrT,
+          depMinRaw: depMin,
+          arrMinRaw: arrMin,
+          durationMin
+        };
+
+        if(!legsByFrom.has(fromLower)) legsByFrom.set(fromLower, []);
+        legsByFrom.get(fromLower).push(leg);
+      }
+    }
+  }
+}
+
+function transferPercentsForLegs(legs){
+  if(!Array.isArray(legs) || legs.length < 2) return [];
+  const rides = legs.map(l => l.durationMin).filter(x=>Number.isFinite(x));
+  const total = rides.reduce((a,b)=>a+b, 0);
+  if(total <= 0) return [];
+  let acc = 0;
+  const out = [];
+  for(let i=0;i<rides.length-1;i++){
+    acc += rides[i];
+    out.push((acc / total) * 100);
+  }
+  return out;
+}
+
+/* ============================
+   SEARCH direct + one change
+   ============================ */
+function findDirect(fromRaw, toRaw){
+  const from = normalizeKey(fromRaw);
+  const to = normalizeKey(toRaw);
+  const out = [];
+  for(const r of routes){
+    const seg = segment(r, from, to);
+    if(seg) out.push(seg);
+  }
+  return out;
+}
+
+function findOneChange(fromRaw, toRaw){
+  const from = normalizeKey(fromRaw);
+  const to = normalizeKey(toRaw);
+
+  const out = [];
+  const seen = new Set();
+
+  for(const r1 of routes){
+    const iFrom1 = stationIndex(r1, from);
+    if(iFrom1 === -1) continue;
+
+    for(let iX1 = iFrom1 + 1; iX1 < r1.schedule.length; iX1++){
+      const transferName = r1.schedule[iX1].station;
+      if(!transferName) continue;
+      const xLower = normalizeKey(transferName);
+
+      const leg1 = segment(r1, from, xLower);
+      if(!leg1) continue;
+
+      for(const r2 of routes){
+        if(String(r2.id) === String(r1.id)) continue;
+
+        const iTo2 = stationIndex(r2, to);
+        if(iTo2 === -1) continue;
+
+        const iX2 = stationIndex(r2, xLower);
+        if(iX2 === -1 || iX2 >= iTo2) continue;
+
+        // évite une correspondance inutile si r2 passe aussi par "from" avant la gare de correspondance
+        const iFromOnR2 = stationIndex(r2, from);
+        if(iFromOnR2 !== -1 && iFromOnR2 < iX2 && iFromOnR2 < iTo2){
+          continue;
+        }
+
+        const leg2 = segment(r2, xLower, to);
+        if(!leg2) continue;
+
+        // contrainte temps correspondance min
+        const arrXMin = toMinutes(timeAtStopForArr(r1, leg1.iTo));
+        const depXMin = toMinutes(timeAtStopForDep(r2, leg2.iFrom));
+        let waitMin = null;
+
+        if(arrXMin != null && depXMin != null){
+          waitMin = diffAcrossMidnight(arrXMin, depXMin);
+          if(waitMin == null || waitMin < MIN_TRANSFER_MINUTES) continue;
+        }
+
+        const key = `${r1.id}|${r2.id}|${xLower}|${leg1.depFrom||""}|${leg2.arrTo||""}`;
+        if(seen.has(key)) continue;
+        seen.add(key);
+
+        out.push({
+          leg1,
+          leg2,
+          transfer: transferName,
+          transferIndexOnLeg1: leg1.iTo,
+          waitMin
+        });
+      }
+    }
+  }
+
+  return out;
+}
+
+/* ============================
+   SEARCH multi-change (iterative deepening)
+   ============================ */
+function findPathsWithChanges(fromRaw, toRaw, changes){
+  buildLegsIndex();
+
+  const from = normalizeKey(fromRaw);
+  const to = normalizeKey(toRaw);
+  if(!from || !to) return [];
+
+  const legsTarget = changes + 1;
+  const results = [];
+  // key => min arrAbs for a GIVEN initial departure time
+  const bestArrByDepth = new Map();
+
+  function shouldPrune(depth, stationLower, depAbs, arrAbs){
+    if(depAbs == null) return false;
+    const key = `${depth}|${stationLower}|${depAbs}`;
+    const prev = bestArrByDepth.get(key);
+    if(prev != null && arrAbs >= prev) return true;
+    bestArrByDepth.set(key, arrAbs);
+    return false;
+  }
+
+  function dfs(currentStationLower, depth, lastLeg, depAbs, arrAbs, legs, visitedStations){
+    if(depth === legsTarget){
+      if(currentStationLower === to) results.push({ legs, depMin: depAbs, arrMin: arrAbs });
+      return;
+    }
+    if(currentStationLower === to) return;
+
+    const nextLegs = legsByFrom.get(currentStationLower) || [];
+
+    for(const leg of nextLegs){
+      // pas de “faux changement” sur le même train
+      if(lastLeg && String(leg.route.id) === String(lastLeg.route.id)) continue;
+
+      let wait = 0;
+      let nextDepAbs = null;
+      if(lastLeg){
+        wait = diffAcrossMidnight(lastLeg.arrMinRaw, leg.depMinRaw);
+        if(wait == null || wait < MIN_TRANSFER_MINUTES) continue;
+        if(MAX_WAIT_FOR_TRANSFER != null && wait > MAX_WAIT_FOR_TRANSFER) continue;
+        nextDepAbs = arrAbs + wait;
+      } else {
+        nextDepAbs = leg.depMinRaw;
+      }
+
+      const nextArrAbs = nextDepAbs + leg.durationMin;
+      const nextDepth = depth + 1;
+      const nextStationLower = normalizeKey(leg.to);
+
+      const baseDepAbs = depAbs ?? nextDepAbs;
+      if(shouldPrune(nextDepth, nextStationLower, baseDepAbs, nextArrAbs)) continue;
+
+      // anti-backtrack: refuser si on repasse par une gare déjà visitée (hors station de correspondance)
+      if(visitedStations){
+        const sched = leg.route?.schedule || [];
+        let bad = false;
+        for(let i=leg.iFrom+1; i<=leg.iTo; i++){
+          const st = normalizeKey(sched[i]?.station || "");
+          if(st && visitedStations.has(st)){ bad = true; break; }
+        }
+        if(bad) continue;
+      }
+
+      const nextLeg = { ...leg, depMinAbs: nextDepAbs, arrMinAbs: nextArrAbs };
+      const nextVisited = visitedStations ? new Set(visitedStations) : new Set();
+      const sched2 = leg.route?.schedule || [];
+      for(let i=leg.iFrom; i<=leg.iTo; i++){
+        const st = normalizeKey(sched2[i]?.station || "");
+        if(st) nextVisited.add(st);
+      }
+
+      dfs(nextStationLower, nextDepth, leg, baseDepAbs, nextArrAbs, legs.concat(nextLeg), nextVisited);
+    }
+  }
+
+  const startVisited = new Set([from]);
+  dfs(from, 0, null, null, null, [], startVisited);
+  return results;
+}
+
+function pickBestPaths(paths){
+  if(!paths.length) return [];
+
+  const byRouteSeq = new Map();
+  for(const p of paths){
+    const seq = p.legs.map(l => l.route.id).join(">");
+    const cur = byRouteSeq.get(seq);
+    if(!cur){
+      byRouteSeq.set(seq, p);
+      continue;
+    }
+
+    const durA = (cur.arrMin != null && cur.depMin != null) ? (cur.arrMin - cur.depMin) : 1e9;
+    const durB = (p.arrMin != null && p.depMin != null) ? (p.arrMin - p.depMin) : 1e9;
+
+    if(durB < durA){
+      byRouteSeq.set(seq, p);
+      continue;
+    }
+    if(durB > durA) continue;
+
+    // tie-break: transfert plus “proche” de la destination (index plus grand sur leg2)
+    const aLeg2 = cur.legs[1];
+    const bLeg2 = p.legs[1];
+    const aIdx = aLeg2 ? aLeg2.iFrom : -1;
+    const bIdx = bLeg2 ? bLeg2.iFrom : -1;
+    if(bIdx > aIdx) byRouteSeq.set(seq, p);
+  }
+
+  return Array.from(byRouteSeq.values());
+}
+
+function findBestConnections(fromRaw, toRaw, nowMin){
+  const all = [];
+  for(let changes = 1; changes <= MAX_CHANGES; changes++){
+    const paths = findPathsWithChanges(fromRaw, toRaw, changes);
+    if(paths.length){
+      const picked = pickBestPaths(paths);
+      all.push(...picked);
+    }
+  }
+  return all;
+}
+
+/* ============================
+   Correspondance dot position (% temps EN TRAIN)
+   ============================ */
+function safeDiff(a,b){
+  if(a == null || b == null) return null;
+  const d = b - a;
+  return Number.isFinite(d) ? d : null;
+}
+
+function transferPercentInTrainTime(leg1, leg2){
+  const leg1Ride = safeDiff(leg1.depFromMin, leg1.arrToMin);
+  const leg2Ride = safeDiff(leg2.depFromMin, leg2.arrToMin);
+  if(leg1Ride == null || leg2Ride == null) return null;
+  const total = leg1Ride + leg2Ride;
+  if(total <= 0) return null;
+  return (leg1Ride / total) * 100;
+}
+
+function railStopsPercentsHTML(percents){
+  const ps = (percents || []).filter(p => Number.isFinite(p));
+  if(ps.length === 0) return "";
+  return ps.map(p=>{
+    const clamped = clamp(p, 5, 95);
+    return `<span class="rail__stop" style="left:${clamped}%;"></span>`;
+  }).join("");
+}
+
+/* ============================
+   Filter/rank changes (si direct existe)
+   ============================ */
+function filterAndRankChanges(changes, directIts, nowMin){
+  // 1) poubelle si correspondance trop courte
+  let valid = changes.filter(ch => ch.waitMin == null || ch.waitMin >= MIN_TRANSFER_MINUTES);
+
+  // 1.b) ne garder que les liaisons "live" ou futures par rapport à l'heure choisie
+  // (sinon on peut éliminer un départ proche car on ne garde que quelques alternatives)
+  if(Number.isFinite(nowMin)){
+    const isLiveOrFuture = (ch) => {
+      const dep = ch.depMin;
+      const arr = ch.arrMin;
+      if(dep == null) return true;
+      if(arr != null && nowMin >= dep && nowMin <= arr) return true;
+      return dep >= nowMin;
+    };
+    valid = valid.filter(isLiveOrFuture);
+  }
+
+  // Pour comparer une correspondance, on la compare à la "meilleure directe possible"
+  // qui part APRES (ou à) l'heure de départ de la correspondance (pas "après maintenant").
+  function bestDirectAfter(depMin){
+    let best = null;
+    for(const d of directIts){
+      if(d.depMin == null || d.arrMin == null) continue;
+      if(d.depMin < depMin) continue;
+      if(!best || d.arrMin < best.arrMin) best = d;
+    }
+    return best;
+  }
+
+  // 2-3) supprimer si une directe existe ET n'est pas pire,
+  // sauf si la correspondance est STRICTEMENT plus courte en durée.
+  const kept = [];
+  for(const ch of valid){
+    const depMin = ch.depMin ?? 0;
+    const bestD = bestDirectAfter(depMin);
+
+    // pas de direct possible après ce départ => on garde
+    if(!bestD){
+      kept.push(ch);
+      continue;
+    }
+
+    const chDur = ch.durationMin;
+    const dDur  = bestD.durationMin;
+    const strictlyShorter = (chDur != null && dDur != null && chDur < dDur);
+
+    // ✅ Anti-parasite : si arrivée identique à la meilleure directe, on garde
+    // seulement si la correspondance est strictement plus courte (sinon inutile)
+    if(ch.arrMin != null && bestD.arrMin != null && ch.arrMin === bestD.arrMin && !strictlyShorter){
+      continue;
+    }
+
+    const arrivesEarlier = (ch.arrMin != null && ch.arrMin < bestD.arrMin);
+    const notTooLate = (ch.arrMin != null && (ch.arrMin - bestD.arrMin) <= MAX_EXTRA_ARRIVAL);
+
+    // "Avant la prochaine directe" = permet de partir avant le prochain direct disponible
+    const beforeNextDirect = depMin < bestD.depMin;
+
+    if(strictlyShorter || arrivesEarlier || (beforeNextDirect && notTooLate)){
+      kept.push(ch);
+    }
+  }
+
+  // 4.x) Pour un même couple de trains (r1 + r2), on garde le meilleur point de changement
+  // selon: attente minimale, puis gare prioritaire, puis le plus tôt possible dans le sens de marche.
+  const byPair = new Map();
+  for(const ch of kept){
+    const key = ch.leg1.route.id + "|" + ch.leg2.route.id;
+    const cur = byPair.get(key);
+    if(!cur){
+      byPair.set(key, ch);
+      continue;
+    }
+
+    const wA = cur.waitMin ?? 1e9;
+    const wB = ch.waitMin ?? 1e9;
+
+    if(wB < wA){
+      byPair.set(key, ch);
+      continue;
+    }
+    if(wB > wA) continue;
+
+    // égalité: priorité de gare (1 = primaire, 2 = secondaire, 3 = tertiaire)
+    const pA = stationClass(cur.transferStation);
+    const pB = stationClass(ch.transferStation);
+
+    if(pB < pA){
+      byPair.set(key, ch);
+      continue;
+    }
+    if(pB > pA) continue;
+
+    // égalité: plus tôt possible (index plus petit sur la leg1)
+    const iA = cur.leg1?.iTo ?? 1e9;
+    const iB = ch.leg1?.iTo ?? 1e9;
+    if(iB < iA) byPair.set(key, ch);
+  }
+
+  const unique = Array.from(byPair.values());
+
+  // 4) on garde max 2 correspondances (la directe est gérée séparément)
+  unique.sort((a,b)=>{
+    // priorité aux départs les plus proches (sinon on perd des départs du matin)
+    const da = a.depMin ?? 1e9;
+    const db = b.depMin ?? 1e9;
+    if(da !== db) return da - db;
+
+    // puis durée + arrivée + attente
+    const dta = a.durationMin ?? 1e9;
+    const dtb = b.durationMin ?? 1e9;
+    if(dta !== dtb) return dta - dtb;
+
+    const aa = a.arrMin ?? 1e9;
+    const ab = b.arrMin ?? 1e9;
+    if(aa !== ab) return aa - ab;
+
+    return (a.waitMin ?? 1e9) - (b.waitMin ?? 1e9);
+  });
+
+  return unique.slice(0, MAX_ALTERNATIVES_TO_KEEP);
+}
+
+/* ============================
+   Build trips (render model)
+   ============================ */
+function buildTrips(directSegs, changeIts){
+  const all = [];
+
+  for(const d of directSegs){
+    // on calcule sur les bornes seulement (évite les anomalies d'horaires internes)
+    const { depMin, arrMin } = depArrMins(d.depFrom, d.arrTo);
+    const durationMin = (depMin != null && arrMin != null) ? (arrMin - depMin) : null;
+
+    all.push({
+      kind:"direct",
+      route: d.route,
+      line: d.route.line,
+      dep: d.depFrom,
+      arr: d.arrTo,
+      depMin, arrMin,
+      durationMin,
+      transfer: null,
+      stopPercents: [],
+      // indices pour modal
+      leg1: null,
+      leg2: null,
+      iFrom: d.iFrom,
+      iTo: d.iTo
+    });
+  }
+
+  for(const ch of changeIts){
+    // support legacy one-change format + new multi-leg format
+    const legs = ch.legs
+      ? ch.legs
+      : [
+          {
+            route: ch.leg1.route,
+            iFrom: ch.leg1.iFrom,
+            iTo: ch.leg1.iTo,
+            dep: ch.leg1.depFrom,
+            arr: ch.leg1.arrTo,
+            depMinAbs: ch.leg1.depFromMin,
+            arrMinAbs: ch.leg1.arrToMin,
+            durationMin: diffAcrossMidnight(ch.leg1.depFromMin, ch.leg1.arrToMin)
+          },
+          {
+            route: ch.leg2.route,
+            iFrom: ch.leg2.iFrom,
+            iTo: ch.leg2.iTo,
+            dep: ch.leg2.depFrom,
+            arr: ch.leg2.arrTo,
+            depMinAbs: ch.leg2.depFromMin,
+            arrMinAbs: ch.leg2.arrToMin,
+            durationMin: diffAcrossMidnight(ch.leg2.depFromMin, ch.leg2.arrToMin)
+          }
+        ];
+
+    const first = legs[0];
+    const last = legs[legs.length-1];
+    const depMin = ch.depMin ?? first?.depMinAbs;
+    const arrMin = ch.arrMin ?? last?.arrMinAbs;
+    const durationMin = (depMin != null && arrMin != null) ? (arrMin - depMin) : null;
+
+    all.push({
+      kind:"change",
+      legs,
+      leg1: legs[0],
+      leg2: legs[1] || null,
+      route: null,
+      line: legs[0]?.route?.line || "",
+      dep: first?.dep || null,
+      arr: last?.arr || null,
+      depMin, arrMin,
+      durationMin,
+      transfer: (legs.length === 2) ? (ch.transfer || legs[0]?.to || null) : null,
+      stopPercents: transferPercentsForLegs(legs),
+      // indices pour modal
+      iFrom: null,
+      iTo: null
+    });
+  }
+
+  const big = 1e9;
+  all.sort((a,b)=>{
+    const aDep = (a.depMin ?? big), bDep = (b.depMin ?? big);
+    if(aDep !== bDep) return aDep - bDep;
+    const aArr = (a.arrMin ?? big), bArr = (b.arrMin ?? big);
+    if(aArr !== bArr) return aArr - bArr;
+    return 0;
+  });
+
+  return all;
+}
+
+/* ============================
+   Post-filter trips by dep time
+   - Keep minimal changes for same departure time
+   - Exception: keep any option that arrives earlier than the best direct
+   ============================ */
+function filterTripsByDeparture(trips){
+  if(!Array.isArray(trips) || trips.length === 0) return trips || [];
+
+  // On garde AU MOINS une liaison par minute de départ.
+  // Pour une même minute, on choisit l'arrivée la plus tôt (donc durée la plus courte).
+  const byDep = new Map();
+  for(const t of trips){
+    const dep = t.depMin ?? null;
+    if(!byDep.has(dep)) byDep.set(dep, []);
+    byDep.get(dep).push(t);
+  }
+
+  const out = [];
+  for(const [dep, group] of byDep.entries()){
+    if(group.length === 1){
+      out.push(group[0]);
+      continue;
+    }
+
+    let bestArr = null;
+    for(const t of group){
+      if(t.arrMin == null) continue;
+      if(bestArr == null || t.arrMin < bestArr) bestArr = t.arrMin;
+    }
+
+    for(const t of group){
+      if(bestArr == null || t.arrMin == null || t.arrMin === bestArr){
+        out.push(t);
+      }
+    }
+
+    // Garde-fou métier:
+    // même si un direct est plus lent qu'une correspondance au même départ,
+    // on conserve au moins une option directe pour cette minute de départ.
+    const hasDirectInOut = out.some(t => (t.depMin ?? null) === dep && t.kind === "direct");
+    if(!hasDirectInOut){
+      const directCandidates = group
+        .filter(t => t.kind === "direct")
+        .sort((a,b)=>
+          ((a.arrMin ?? 1e9) - (b.arrMin ?? 1e9)) ||
+          ((a.durationMin ?? 1e9) - (b.durationMin ?? 1e9))
+        );
+      if(directCandidates.length){
+        out.push(directCandidates[0]);
+      }
+    }
+  }
+
+  // preserve global ordering (dep then arr)
+  const big = 1e9;
+  out.sort((a,b)=>{
+    const aDep = (a.depMin ?? big), bDep = (b.depMin ?? big);
+    if(aDep !== bDep) return aDep - bDep;
+    const aArr = (a.arrMin ?? big), bArr = (b.arrMin ?? big);
+    if(aArr !== bArr) return aArr - bArr;
+    return 0;
+  });
+
+  return out;
+}
+
+// Si plusieurs trajets arrivent exactement à la même heure,
+// on garde uniquement celui qui part le plus tard.
+function filterTripsByArrivalKeepLatest(trips){
+  if(!Array.isArray(trips) || trips.length === 0) return trips || [];
+
+  const byArr = new Map();
+  for(const t of trips){
+    const arr = t.arrMin ?? null;
+    if(!byArr.has(arr)) byArr.set(arr, []);
+    byArr.get(arr).push(t);
+  }
+
+  const out = [];
+  for(const [arr, group] of byArr.entries()){
+    if(group.length === 1){
+      out.push(group[0]);
+      continue;
+    }
+
+    let bestDep = null;
+    for(const t of group){
+      if(t.depMin == null) continue;
+      if(bestDep == null || t.depMin > bestDep) bestDep = t.depMin;
+    }
+
+    for(const t of group){
+      if(bestDep == null || t.depMin == null || t.depMin === bestDep){
+        out.push(t);
+      }
+    }
+  }
+
+  const big = 1e9;
+  out.sort((a,b)=>{
+    const aDep = (a.depMin ?? big), bDep = (b.depMin ?? big);
+    if(aDep !== bDep) return aDep - bDep;
+    const aArr = (a.arrMin ?? big), bArr = (b.arrMin ?? big);
+    if(aArr !== bArr) return aArr - bArr;
+    return 0;
+  });
+
+  return out;
+}
+
+// Si même heure d'arrivée (HH:MM) sur des jours différents,
+// garder la liaison la plus courte (et à égalité, celle qui part le plus tard).
+function filterTripsByArrivalClockKeepLatest(trips){
+  if(!Array.isArray(trips) || trips.length === 0) return trips || [];
+
+  const byArrClock = new Map(); // arrClock -> [trips]
+  for(const t of trips){
+    const arr = t.arrMin;
+    const key = (arr == null) ? null : (arr % 1440);
+    if(!byArrClock.has(key)) byArrClock.set(key, []);
+    byArrClock.get(key).push(t);
+  }
+
+  const out = [];
+  for(const group of byArrClock.values()){
+    if(group.length === 1){
+      out.push(group[0]);
+      continue;
+    }
+    let bestDur = null;
+    let bestDep = null;
+    for(const t of group){
+      if(t.depMin == null || t.arrMin == null) continue;
+      const dur = t.arrMin - t.depMin;
+      if(bestDur == null || dur < bestDur || (dur === bestDur && t.depMin > bestDep)){
+        bestDur = dur;
+        bestDep = t.depMin;
+      }
+    }
+    for(const t of group){
+      if(bestDur == null || t.depMin == null || t.arrMin == null){
+        out.push(t);
+        continue;
+      }
+      const dur = t.arrMin - t.depMin;
+      if(dur === bestDur && t.depMin === bestDep){
+        out.push(t);
+      }
+    }
+  }
+
+  const big = 1e9;
+  out.sort((a,b)=>{
+    const aDep = (a.depMin ?? big), bDep = (b.depMin ?? big);
+    if(aDep !== bDep) return aDep - bDep;
+    const aArr = (a.arrMin ?? big), bArr = (b.arrMin ?? big);
+    if(aArr !== bArr) return aArr - bArr;
+    return 0;
+  });
+
+  return out;
+}
+
+// Si même départ ET même arrivée, garder la liaison avec le moins de correspondances.
+function filterTripsBySameDepArr(trips){
+  if(!Array.isArray(trips) || trips.length === 0) return trips || [];
+
+  const byKey = new Map(); // "dep|arr" -> [trips]
+  for(const t of trips){
+    const dep = t.depMin ?? null;
+    const arr = t.arrMin ?? null;
+    const key = `${dep}|${arr}`;
+    if(!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(t);
+  }
+
+  const out = [];
+  for(const group of byKey.values()){
+    if(group.length === 1){
+      out.push(group[0]);
+      continue;
+    }
+    let minChanges = Infinity;
+    for(const t of group){
+      const changes = (t.kind === "direct") ? 0 : (Array.isArray(t.legs) ? (t.legs.length - 1) : 1);
+      if(changes < minChanges) minChanges = changes;
+    }
+    for(const t of group){
+      const changes = (t.kind === "direct") ? 0 : (Array.isArray(t.legs) ? (t.legs.length - 1) : 1);
+      if(changes === minChanges) out.push(t);
+    }
+  }
+
+  return out;
+}
+
+// Supprime une liaison si une autre part plus tard (ou égale) et arrive plus tôt (ou égale),
+// avec amélioration stricte sur au moins un des deux critères.
+function filterTripsByDominance(trips){
+  if(!Array.isArray(trips) || trips.length === 0) return trips || [];
+
+  const candidates = trips.filter(t => t.depMin != null && t.arrMin != null);
+  if(candidates.length < 2) return trips;
+
+  const out = [];
+  for(const t of trips){
+    if(t.depMin == null || t.arrMin == null){
+      out.push(t);
+      continue;
+    }
+    let dominated = false;
+    for(const o of candidates){
+      if(o === t) continue;
+      if(o.depMin >= t.depMin && o.arrMin <= t.arrMin){
+        if(o.depMin > t.depMin || o.arrMin < t.arrMin){
+          dominated = true;
+          break;
+        }
+      }
+    }
+    if(!dominated) out.push(t);
+  }
+
+  return out;
+}
+
+
+// Si un direct existe qui part après (ou à) l'heure de départ et arrive plus tôt,
+// on supprime les correspondances dominées.
+function filterTripsByDirectDominance(trips){
+  if(!Array.isArray(trips) || trips.length === 0) return trips || [];
+
+  const directs = trips
+    .filter(t => t.kind === "direct" && t.depMin != null && t.arrMin != null)
+    .sort((a,b)=> (a.depMin - b.depMin) || (a.arrMin - b.arrMin));
+
+  if(!directs.length) return trips;
+
+  function bestDirectAfter(depMin){
+    let lo = 0, hi = directs.length - 1, ans = null;
+    while(lo <= hi){
+      const mid = (lo + hi) >> 1;
+      const d = directs[mid];
+      if(d.depMin >= depMin){
+        ans = d;
+        hi = mid - 1;
+      } else {
+        lo = mid + 1;
+      }
+    }
+    return ans;
+  }
+
+  const out = [];
+  for(const t of trips){
+    if(t.kind === "direct"){
+      out.push(t);
+      continue;
+    }
+    if(t.depMin == null || t.arrMin == null){
+      out.push(t);
+      continue;
+    }
+    const best = bestDirectAfter(t.depMin);
+    if(!best){
+      out.push(t);
+      continue;
+    }
+    const dominated = (t.arrMin >= best.arrMin) && (t.durationMin == null || best.durationMin == null || t.durationMin >= best.durationMin);
+    if(!dominated){
+      out.push(t);
+    }
+  }
+
+  return out;
+}
+
+// Garantie produit: si un direct existe pour la relation recherchée,
+// on conserve au moins une option directe dans la liste finale.
+function ensureOneDirectOption(trips, directSegs, nowMin){
+  if(!Array.isArray(trips)) return [];
+  if(trips.some(t => t.kind === "direct")) return trips;
+  if(!Array.isArray(directSegs) || directSegs.length === 0) return trips;
+
+  const directTrips = buildTrips(directSegs, []);
+  if(!directTrips.length) return trips;
+
+  // Priorité: direct futur le plus proche, sinon meilleur direct global.
+  let chosen = null;
+  const future = directTrips
+    .filter(t => t.depMin != null && nowMin != null && t.depMin >= nowMin)
+    .sort((a,b)=>
+      (a.depMin - b.depMin) ||
+      ((a.arrMin ?? 1e9) - (b.arrMin ?? 1e9)) ||
+      ((a.durationMin ?? 1e9) - (b.durationMin ?? 1e9))
+    );
+
+  if(future.length){
+    chosen = future[0];
+  } else {
+    chosen = [...directTrips].sort((a,b)=>
+      ((a.arrMin ?? 1e9) - (b.arrMin ?? 1e9)) ||
+      ((a.durationMin ?? 1e9) - (b.durationMin ?? 1e9)) ||
+      ((a.depMin ?? 1e9) - (b.depMin ?? 1e9))
+    )[0];
+  }
+
+  if(!chosen) return trips;
+
+  const out = trips.concat([chosen]);
+  const big = 1e9;
+  out.sort((a,b)=>{
+    const aDep = (a.depMin ?? big), bDep = (b.depMin ?? big);
+    if(aDep !== bDep) return aDep - bDep;
+    const aArr = (a.arrMin ?? big), bArr = (b.arrMin ?? big);
+    if(aArr !== bArr) return aArr - bArr;
+    if(a.kind !== b.kind) return a.kind === "direct" ? -1 : 1;
+    return 0;
+  });
+
+  return out;
+}
+
+// Protection forte: ne jamais perdre des directs à cause des filtres d'optimisation.
+function reinjectAllDirectOptions(trips, directSegs){
+  if(!Array.isArray(trips)) return [];
+  if(!Array.isArray(directSegs) || directSegs.length === 0) return trips;
+
+  const directTrips = buildTrips(directSegs, []);
+  if(!directTrips.length) return trips;
+
+  const out = trips.slice();
+  const seen = new Set(
+    out.map(t=>{
+      const rid = t.route?.id || "";
+      return `${t.kind}|${rid}|${t.depMin ?? ""}|${t.arrMin ?? ""}`;
+    })
+  );
+
+  for(const d of directTrips){
+    const key = `${d.kind}|${d.route?.id || ""}|${d.depMin ?? ""}|${d.arrMin ?? ""}`;
+    if(seen.has(key)) continue;
+    seen.add(key);
+    out.push(d);
+  }
+
+  const big = 1e9;
+  out.sort((a,b)=>{
+    const aDep = (a.depMin ?? big), bDep = (b.depMin ?? big);
+    if(aDep !== bDep) return aDep - bDep;
+    const aArr = (a.arrMin ?? big), bArr = (b.arrMin ?? big);
+    if(aArr !== bArr) return aArr - bArr;
+    if(a.kind !== b.kind) return a.kind === "direct" ? -1 : 1;
+    return 0;
+  });
+
+  return out;
+}
+
+/* ============================
+   CARD HTML
+   ============================ */
+function renderTripCardHTML(t, idx){
+  // ✅ secondes "dépliées" si on a depMin/arrMin (ex: arrivée 01:00 => 25:00)
+  const depSec = (t.depMin != null) ? (t.depMin * 60) : toSeconds(t.dep);
+  const arrSec = (t.arrMin != null) ? (t.arrMin * 60) : toSeconds(t.arr);
+
+  const changesCount = (t.kind === "change" && Array.isArray(t.legs)) ? (t.legs.length - 1) : 1;
+  const subtitle = (t.kind === "direct")
+    ? "Direct"
+    : `Correspondance${changesCount > 1 ? ` x${changesCount}` : ""}`;
+  const durationTxt = (t.durationMin != null) ? minutesToHuman(t.durationMin) : "";
+
+  const firstRoute = (t.kind === "direct") ? t.route : t.leg1.route;
+  const title = `Direction ${trainTerminus(firstRoute)}`;
+
+  const lineTag = (t.kind === "direct")
+    ? (t.route?.line || "")
+    : (Array.isArray(t.legs)
+        ? t.legs.map(l => l.route?.line || "").filter(Boolean).join(" → ")
+        : `${t.leg1?.route?.line || ""} → ${t.leg2?.route?.line || ""}`);
+  const tagSuffix = serviceClassSuffix(lineTag);
+  const lineTagClass = `lineTag${tagSuffix ? ` lineTag--${tagSuffix}` : ""}`;
+
+  return `
+    <article class="trip"
+             data-tripindex="${idx}"
+             data-depsec="${depSec ?? ""}"
+             data-arrsec="${arrSec ?? ""}">
+      <header class="trip__head">
+        <span class="${lineTagClass}">${escapeHtml(lineTag)}</span>
+        <span class="trip__title">${escapeHtml(title)}</span>
+        <span class="trip__subtitle">${escapeHtml(subtitle)}</span>
+      </header>
+
+      <section class="trip__timeline">
+        <time class="time time--left">${escapeHtml(displayTime(t.dep))}</time>
+
+        <div class="rail" aria-hidden="true">
+          <span class="rail__dot rail__dot--start"></span>
+          <span class="rail__dot rail__dot--end"></span>
+
+          ${railStopsPercentsHTML(t.stopPercents)}
+
+          <span class="rail__live" style="left:0%;"></span>
+        </div>
+
+        <time class="time time--right">${escapeHtml(displayTime(t.arr))}</time>
+      </section>
+
+      <footer class="trip__foot">
+        <span class="duration">${escapeHtml(durationTxt)}</span>
+        <span></span>
+      </footer>
+    </article>
+  `;
+}
+
+/* ============================
+   RENDER RESULTS (SEARCH)
+   - SEUL le 1er LIVE + FUTURS
+   - "relations précédentes" = déjà partis mais pas live
+   ============================ */
+function renderTrips(trips, fromRaw, toRaw){
+  const results = $("results");
+  const status = $("status");
+  if(!results || !status) return;
+
+  lastSearchContext = { from: fromRaw, to: toRaw, mode: "search" };
+
+  if(trips.length === 0){
+    status.textContent = `❌ Aucun chemin trouvé pour ${fromRaw} → ${toRaw}.`;
+    results.innerHTML = "";
+    lastRenderedTrips = [];
+    lastPastTrips = [];
+    return;
+  }
+
+  // IMPORTANT: la séparation passé / live / futur doit se faire par rapport
+  // à la date+heure choisies (pas forcément "maintenant").
+  const nowMin = (lastQueryRef && Number.isFinite(lastQueryRef.nowMin))
+    ? lastQueryRef.nowMin
+    : Math.floor(nowSeconds()/60);
+  const allowLive = !!(lastQueryRef && lastQueryRef.isToday);
+
+  const isLive = (t) =>
+    allowLive &&
+    t.depMin != null && t.arrMin != null &&
+    nowMin >= t.depMin && nowMin <= t.arrMin;
+
+  const isPast = (t) =>
+    t.depMin != null && t.depMin < nowMin && !isLive(t);
+
+  const isFuture = (t) =>
+    t.depMin != null && t.depMin >= nowMin;
+
+  const past = [];
+  const live = [];
+  const future = [];
+
+  for(const t of trips){
+    if(isPast(t)) past.push(t);
+    else if(isLive(t)) live.push(t);
+    else if(isFuture(t)) future.push(t);
+    else future.push(t);
+  }
+
+  past.sort((a,b)=>(a.depMin??-1e9)-(b.depMin??-1e9));
+  live.sort((a,b)=>(a.depMin??1e9)-(b.depMin??1e9));
+  future.sort((a,b)=>(a.depMin??1e9)-(b.depMin??1e9));
+
+  const firstLive = live.length ? live[0] : null;
+  const otherLives = firstLive ? live.filter(t => t !== firstLive) : [];
+
+  const mainList = (firstLive ? [firstLive, ...otherLives] : []).concat(future);
+
+  lastRenderedTrips = mainList;
+  lastPastTrips = past;
+
+  status.textContent = `${mainList.length} liaison(s) affichée(s) pour ${fromRaw} → ${toRaw}.`;
+
+  const prevBtn = past.length
+    ? `<button class="prevBtn" id="prevBtn" type="button">Relations précédentes (${past.length})</button>`
+    : "";
+
+  const prevHtml = past.length
+    ? `<div class="prevWrap" id="prevWrap" hidden>
+         ${past.map((t,i)=>renderTripCardHTML(t, `past:${i}`)).join("")}
+       </div>`
+    : "";
+
+  results.innerHTML = `
+    <div class="resultsToolbar">${prevBtn}</div>
+    ${prevHtml}
+    <div class="mainWrap">
+      ${mainList.map((t,i)=>renderTripCardHTML(t, i)).join("")}
+    </div>
+  `;
+
+  const btn = $("prevBtn");
+  if(btn){
+    btn.addEventListener("click", ()=>{
+      const wrap = $("prevWrap");
+      if(!wrap) return;
+
+      const opening = wrap.hasAttribute("hidden");
+      if(opening){
+        wrap.removeAttribute("hidden");
+        btn.textContent = "Masquer les relations précédentes";
+      } else {
+        wrap.setAttribute("hidden", "");
+        btn.textContent = `Relations précédentes (${past.length})`;
+      }
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      bindTripCardClicks(); // IMPORTANT: rebinder quand on dévoile
+    });
+  }
+
+  bindTripCardClicks();
+  startLiveAnimation();
+}
+
+/* ============================
+   HOME: render all routes
+   - 1er LIVE en tête
+   ============================ */
+function routeStartMin(route){
+  const first = route.schedule?.[0];
+  const t = first?.dep || first?.arr || null;
+  const m = toMinutes(t);
+  return (m == null) ? 1e9 : m;
+}
+
+function buildHomeTrips(){
+  const sorted = [...routes].sort((a,b)=> routeStartMin(a) - routeStartMin(b));
+
+  // convert to trip objects
+  const trips = sorted.map(r=>{
+    const dep = r.schedule?.[0]?.dep || r.schedule?.[0]?.arr || null;
+    const arr = r.schedule?.[r.schedule.length-1]?.arr || r.schedule?.[r.schedule.length-1]?.dep || null;
+
+    const { depMin: depMinU, arrMin: arrMinU } = depArrMins(dep, arr);
+
+    return {
+      kind:"direct",
+      route:r,
+      line:r.line,
+      dep, arr,
+      depMin: depMinU,
+      arrMin: arrMinU,
+      durationMin: (depMinU!=null && arrMinU!=null) ? (arrMinU - depMinU) : null,
+      transfer:null,
+      stopPercents: [],
+      leg1:null, leg2:null,
+      iFrom: 0,
+      iTo: (r.schedule?.length ? r.schedule.length-1 : 0)
+    };
+  });
+
+   // reorder HOME:
+  // - premier live
+  // - autres lives
+  // - futures
+  // - passées
+  const nowMin = Math.floor(nowSeconds() / 60);
+
+  const isLive = (t) =>
+    t.depMin != null && t.arrMin != null &&
+    nowMin >= t.depMin && nowMin <= t.arrMin;
+
+  const isPast = (t) =>
+    t.arrMin != null && nowMin > t.arrMin;
+
+  const live = trips
+    .filter(isLive)
+    .sort((a, b) => (a.depMin ?? 1e9) - (b.depMin ?? 1e9));
+
+  const future = trips
+    .filter(t => !isLive(t) && !isPast(t))
+    .sort((a, b) => (a.depMin ?? 1e9) - (b.depMin ?? 1e9));
+
+  const past = trips
+    .filter(isPast)
+    .sort((a, b) => (a.depMin ?? 1e9) - (b.depMin ?? 1e9));
+
+  if(live.length === 0){
+    // pas de live => futures puis passées
+    return [...future, ...past];
+  }
+
+  const firstLive = live[0];
+  const otherLives = live.slice(1);
+
+  return [firstLive, ...otherLives, ...future, ...past];
+}
+
+function renderAllRoutes(){
+  const results = $("results");
+  const status = $("status");
+  if(!results || !status) return;
+
+  lastSearchContext = { from: "", to: "", mode: "home" };
+  applyEffectiveRoutes(queryReference().selDate);
+
+  const homeTrips = buildHomeTrips();
+  lastRenderedTrips = homeTrips;
+
+  status.textContent = `Affichage de toutes les routes (${homeTrips.length}).`;
+
+  results.innerHTML = `
+    <div class="mainWrap">
+      ${homeTrips.map((t,i)=>renderTripCardHTML(t, i)).join("")}
+    </div>
+  `;
+
+  bindTripCardClicks();
+  startLiveAnimation();
+}
+
+/* ============================
+   CLICK => OPEN MODAL (cards)
+   ============================ */
+function bindTripCardClicks(){
+  document.querySelectorAll(".trip").forEach(card=>{
+    card.addEventListener("click", ()=>{
+      const id = String(card.dataset.tripindex ?? "");
+      const trip = resolveTripFromCardId(id);
+      if(!trip) return;
+
+      // modal only really meaningful when search has from/to,
+      // but we still allow on home (shows full route as "De — à —" style)
+      const fromLabel = lastSearchContext.mode === "search" ? lastSearchContext.from : (trip.kind==="direct" ? trip.route.schedule[0]?.station : trip.leg1.route.schedule[0]?.station) || "—";
+      const toLabel   = lastSearchContext.mode === "search" ? lastSearchContext.to   : (trip.kind==="direct" ? trainTerminus(trip.route) : trainTerminus(trip.leg2.route)) || "—";
+
+      openModal(trip, fromLabel, toLabel);
+    }, { once:false });
+  });
+}
+
+function resolveTripFromCardId(id){
+  if(/^\d+$/.test(id)){
+    const idx = Number(id);
+    return lastRenderedTrips[idx] || null;
+  }
+  const m = /^past:(\d+)$/.exec(id);
+  if(m){
+    const idx = Number(m[1]);
+    return lastPastTrips[idx] || null;
+  }
+  return null;
+}
+
+/* ============================
+   MODAL (open/close + events)
+   ============================ */
+function openModal(trip, fromLabel, toLabel){
+  modalTrip = trip;
+  modalFrom = fromLabel;
+  modalTo = toLabel;
+  modalOpen = true;
+  if(trip && trip.kind === "change") modalTab = "overview";
+
+  const overlay = $("modalOverlay");
+  const titleEl = $("modalTitle");
+  const subEl = $("modalSub");
+  const bodyEl = $("modalBody");
+  if(!overlay || !titleEl || !subEl || !bodyEl) return;
+
+  titleEl.textContent = `${fromLabel} → ${toLabel}`;
+  const firstRoute = (trip.kind === "direct") ? trip.route : trip.leg1.route;
+  subEl.textContent = `${trip.line} · Direction ${trainTerminus(firstRoute)}`;
+
+  bodyEl.innerHTML = renderModalTimeline(trip, fromLabel, toLabel);
+
+  // Onglets + première timeline
+  bindModalTabs();
+  renderModalTab(modalTab);
+
+  overlay.hidden = false;
+  document.body.classList.add("modalOpen");
+
+  // reset scroll position
+  const modalEl = overlay.querySelector(".modal");
+  if(modalEl) modalEl.scrollTop = 0;
+
+  requestAnimationFrame(() => {
+    updateUserBoundaryTimes();
+    layoutModalRail();
+    updateModalLive();
+    if(modalEl) modalEl.scrollTop = 0;
+  });
+}
+
+
+function closeModal(){
+  modalOpen = false;
+  modalTrip = null;
+
+  const overlay = $("modalOverlay");
+  if(overlay) overlay.hidden = true;
+
+  refreshOverlayBodyClass();
+  document.body.classList.remove("modalOpen");
+}
+
+function bindModalEvents(){
+  const overlay = $("modalOverlay");
+  const closeBtn = $("modalCloseBtn");
+  if(!overlay) return;
+
+  overlay.addEventListener("mousedown", (e)=>{
+    const modal = overlay.querySelector(".modal");
+    if(modal && !modal.contains(e.target)) closeModal();
+  });
+
+  if(closeBtn) closeBtn.addEventListener("click", closeModal);
+
+  document.addEventListener("keydown", (e)=>{
+    if(e.key === "Escape" && overlay && !overlay.hidden) closeModal();
+  });
+}
+
+/* ============================
+   MODAL timeline data build
+   ============================ */
+function stopObj(s){
+  return {
+    station: s.station,
+    arr: s.arr || null,
+    dep: s.dep || null,
+    voie: (s.voie == null || s.voie === "") ? null : String(s.voie),
+    arrMin: toMinutes(s.arr),
+    depMin: toMinutes(s.dep)
+  };
+}
+
+function renderStationCell(stop){
+  const voie = (stop && stop.voie != null && String(stop.voie).trim() !== "")
+    ? `<span class="vTrack">Voie ${escapeHtml(String(stop.voie))}</span>`
+    : "";
+  return `<div class="vStation"><span class="vStationName">${escapeHtml(stop?.station || "")}</span>${voie}</div>`;
+}
+
+function buildModalStops(trip, fromLabel, toLabel){
+  const fromLower = normalizeKey(fromLabel);
+  const toLower = normalizeKey(toLabel);
+
+  if(trip.kind === "direct"){
+    const r = trip.route;
+    const iFrom = stationIndex(r, fromLower);
+    const iTo = stationIndex(r, toLower);
+
+    // fallback si la recherche est vide / home
+    const safeFrom = (iFrom >= 0) ? iFrom : (trip.iFrom ?? 0);
+    const safeTo = (iTo >= 0) ? iTo : (trip.iTo ?? (r.schedule.length-1));
+
+    const pre  = (safeFrom > 0) ? r.schedule.slice(0, safeFrom).map(stopObj) : [];
+    const mid  = r.schedule.slice(safeFrom, safeTo+1).map(stopObj);
+    const post = (safeTo < r.schedule.length-1) ? r.schedule.slice(safeTo+1).map(stopObj) : [];
+
+    return { pre, mid, post };
+  }
+
+  // correspondance
+  const r1 = trip.leg1.route;
+  const r2 = trip.leg2.route;
+
+  const iFrom1 = trip.leg1.iFrom;
+  const iTo1 = trip.leg1.iTo;
+  const iFrom2 = trip.leg2.iFrom;
+  const iTo2 = trip.leg2.iTo;
+
+  const pre = (iFrom1 > 0) ? r1.schedule.slice(0, iFrom1).map(stopObj) : [];
+
+  const mid1 = r1.schedule.slice(iFrom1, iTo1+1).map(stopObj);
+  const mid2 = r2.schedule.slice(iFrom2, iTo2+1).map(stopObj);
+
+  const mid = mid1.concat(mid2.slice(1)); // sans dupliquer la gare de correspondance
+  const post = (iTo2 < r2.schedule.length-1) ? r2.schedule.slice(iTo2+1).map(stopObj) : [];
+
+  return { pre, mid, post };
+}
+
+function rowTimeText(stop, isFirst, isLast){
+  // Comme demandé : origine=dep ; terminus=arr ; intermédiaire=arr
+  if(isFirst) return displayTime(stop.dep || stop.arr);
+  if(isLast) return displayTime(stop.arr || stop.dep);
+  return displayTime(stop.arr || stop.dep);
+}
+
+function stopProgressMin(stop, isFirst, isLast){
+  // Temps "progression" pour le live :
+  // - origine: DEP
+  // - terminus: ARR
+  // - intermédiaire: ARR (car le train "arrive" à cet instant)
+  if(isFirst) return stop.depMin ?? stop.arrMin ?? null;
+  if(isLast)  return stop.arrMin ?? stop.depMin ?? null;
+  return stop.arrMin ?? stop.depMin ?? null;
+}
+
+function setRowTimes(row, mode){
+  // mode: "origin" | "terminus" | "middle"
+  const arr = row.dataset.arr || "";
+  const dep = row.dataset.dep || "";
+
+  let depAligned = "";
+  let arrAbove = "";
+
+  if(mode === "origin"){
+    depAligned = displayTime(dep || arr || "");
+    arrAbove = "";
+  } else if(mode === "terminus"){
+    depAligned = displayTime(arr || dep || "");
+    arrAbove = "";
+  } else {
+    depAligned = displayTime(dep || "");
+    arrAbove = displayTime(arr || "");
+  }
+
+  const timeCell = row.querySelector(".vTimeCell");
+  if(!timeCell) return;
+
+  timeCell.innerHTML = `
+    ${arrAbove ? `<div class="vArrTime">${escapeHtml(arrAbove)}</div>` : ""}
+    <div class="vDepTime">${escapeHtml(depAligned)}</div>
+  `;
+
+  // IMPORTANT: recalcul tmin (sert au live)
+  const isFirst = (mode === "origin");
+  const isLast  = (mode === "terminus");
+  row.dataset.tmin = stopProgressMin({ arr, dep }, isFirst, isLast) ?? "";
+}
+
+function updateUserBoundaryTimes(){
+  const wrap = $("modalVWrap");
+  if(!wrap) return;
+
+  const user = wrap.querySelector("#userSegment");
+  if(!user) return;
+
+  const rows = Array.from(user.querySelectorAll(".vRow"));
+  if(rows.length === 0) return;
+
+  const preOpen  = !($("foldPre")?.hasAttribute("hidden") ?? true);
+  const postOpen = !($("foldPost")?.hasAttribute("hidden") ?? true);
+
+  const first = rows[0];
+  const last  = rows[rows.length - 1];
+
+  // par défaut : cas 1 (toggles fermés) => A=origin, B=terminus
+  let firstMode = preOpen ? "middle" : "origin";
+  let lastMode  = postOpen ? "middle" : "terminus";
+
+  // exceptions : si c’est VRAIE origine/terminus du train (selon dep/arr)
+  if((first.dataset.dep || "") && !(first.dataset.arr || "")) firstMode = "origin";
+  if((last.dataset.arr || "") && !(last.dataset.dep || ""))   lastMode = "terminus";
+
+  // applique
+  setRowTimes(first, firstMode);
+
+  // si 1 seul stop, évite de l’écraser deux fois
+  if(last !== first) setRowTimes(last, lastMode);
+}
+
+function modalStopTimeLabel(s, isFirst, isLast){
+  // origine = dep ; terminus = arr ; intermédiaire = arr (comme ton code actuel)
+  if(isFirst) return displayTime(s.dep || s.arr);
+  if(isLast)  return displayTime(s.arr || s.dep);
+  return displayTime(s.arr || s.dep);
+}
+
+function buildStopsForLeg(route, iFrom, iTo){
+  return route.schedule.slice(iFrom, iTo + 1).map(stopObj);
+}
+
+function buildModalStopsForLeg(route, iFrom, iTo){
+  const pre  = route.schedule.slice(0, iFrom).map(stopObj);
+  const mid  = route.schedule.slice(iFrom, iTo + 1).map(stopObj);
+  const post = route.schedule.slice(iTo + 1).map(stopObj);
+  return { pre, mid, post };
+}
+
+function renderModalTimeline(trip, fromLabel, toLabel){
+  // Modal "direct" : on garde ton rendu CFF-like (avec toggles pre/post)
+  if(trip.kind === "direct"){
+    const { pre, mid, post } = buildModalStops(trip, fromLabel, toLabel);
+    const r = trip.route;
+    const dep = timeAtStopForDep(r, trip.iFrom ?? 0);
+    const arr = timeAtStopForArr(r, trip.iTo ?? (r.schedule.length-1));
+    const dur = (toMinutes(dep)!=null && toMinutes(arr)!=null) ? diffAcrossMidnight(toMinutes(dep), toMinutes(arr)) : null;
+    const badgeId = r?.id || "";
+    const badgeSuffix = serviceClassSuffix(badgeId);
+    const badgeClass = `cxBadge${badgeSuffix ? ` cxBadge--${badgeSuffix}` : ""}`;
+
+    const toggleRow = (kind, text) => `
+      <button class="vToggle" type="button" data-toggle="${escapeHtml(kind)}">
+        <span class="vTogglePlus">+</span>
+        <span class="vToggleText">${escapeHtml(text)}</span>
+      </button>
+    `;
+
+    const renderStops = (stops, muted=false) => stops.map((s)=>{
+      const isFirst = (s.dep && !s.arr);
+      const isLast  = (s.arr && !s.dep);
+
+      let depAligned = "";
+      let arrAbove = "";
+
+      if(isFirst){
+        depAligned = displayTime(s.dep || s.arr || "");
+        arrAbove = "";
+      } else if(isLast){
+        depAligned = displayTime(s.arr || s.dep || "");
+        arrAbove = "";
+      } else {
+        depAligned = displayTime(s.dep || "");
+        arrAbove = displayTime(s.arr || "");
+      }
+
+      const tMin = stopProgressMin(s, isFirst, isLast);
+
+      return `
+        <div class="vRow ${muted ? "is-muted" : ""}"
+          data-arr="${escapeHtml(s.arr || "")}"
+          data-dep="${escapeHtml(s.dep || "")}"
+          data-tmin="${tMin ?? ""}">
+          <div class="vTimeCell">
+            ${arrAbove ? `<div class="vArrTime">${escapeHtml(arrAbove)}</div>` : ""}
+            <div class="vDepTime">${escapeHtml(depAligned)}</div>
+          </div>
+
+          <div class="vLineCol"><span class="vDot"></span></div>
+          ${renderStationCell(s)}
+        </div>
+      `;
+    }).join("");
+
+    const preLabel  = pre.length  ? pre[0].station : "";
+    const postLabel = post.length ? post[post.length-1].station : "";
+
+    return `
+      <div class="cxSummary">
+        <div class="cxLeg">
+          <div class="cxLegTop">
+            <span class="${badgeClass}">${escapeHtml(badgeId)}</span>
+            <span class="cxDir">Direction ${escapeHtml(trainTerminus(r))}</span>
+          </div>
+          <div class="cxTimes">
+            <span class="cxT">${escapeHtml(displayTime(dep))}</span>
+            <span class="cxArrow">→</span>
+            <span class="cxT">${escapeHtml(displayTime(arr))}</span>
+          </div>
+          <div class="cxMeta">${dur!=null ? escapeHtml(minutesToHuman(dur)) : ""}</div>
+        </div>
+      </div>
+      <div class="vWrap" id="modalVWrap">
+        <div class="vRail" id="modalRail"></div>
+        <div class="vLive" id="modalLiveDot"></div>
+
+        ${pre.length ? toggleRow("pre", `Itinéraire depuis ${preLabel}`) : ""}
+        <div class="vFold" id="foldPre" hidden>
+          ${renderStops(pre, true)}
+        </div>
+
+        <div id="userSegment">
+          ${renderStops(mid, false)}
+        </div>
+
+        ${post.length ? toggleRow("post", `Itinéraire jusqu’à ${postLabel}`) : ""}
+        <div class="vFold" id="foldPost" hidden>
+          ${renderStops(post, true)}
+        </div>
+      </div>
+    `;
+  }
+
+  // Modal "correspondance" : header + onglets (1 ou plusieurs correspondances)
+  const legs = Array.isArray(trip.legs) && trip.legs.length
+    ? trip.legs
+    : [trip.leg1, trip.leg2].filter(Boolean);
+
+  const summaryHTML = legs.map((leg, idx)=>{
+    const r = leg.route;
+    const dep = timeAtStopForDep(r, leg.iFrom);
+    const arr = timeAtStopForArr(r, leg.iTo);
+    const dur = (toMinutes(dep)!=null && toMinutes(arr)!=null) ? diffAcrossMidnight(toMinutes(dep), toMinutes(arr)) : null;
+    const badgeId = r?.id || "";
+    const badgeSuffix = serviceClassSuffix(badgeId);
+    const badgeClass = `cxBadge${badgeSuffix ? ` cxBadge--${badgeSuffix}` : ""}`;
+
+    const legHtml = `
+      <div class="cxLeg">
+        <div class="cxLegTop">
+          <span class="${badgeClass}">${escapeHtml(badgeId)}</span>
+          <span class="cxDir">Direction ${escapeHtml(trainTerminus(r))}</span>
+        </div>
+        <div class="cxTimes">
+          <span class="cxT">${escapeHtml(displayTime(dep))}</span>
+          <span class="cxArrow">→</span>
+          <span class="cxT">${escapeHtml(displayTime(arr))}</span>
+        </div>
+        <div class="cxMeta">${dur!=null ? escapeHtml(minutesToHuman(dur)) : ""}</div>
+      </div>
+    `;
+
+    if(idx >= legs.length-1) return legHtml;
+
+    const next = legs[idx+1];
+    const transferStation = leg.route?.schedule?.[leg.iTo]?.station || "Correspondance";
+    const waitMin = (() => {
+      const a = toMinutes(timeAtStopForArr(leg.route, leg.iTo));
+      const d = toMinutes(timeAtStopForDep(next.route, next.iFrom));
+      if(a == null || d == null) return null;
+      return diffAcrossMidnight(a, d);
+    })();
+
+    const transferHtml = `
+      <div class="cxTransfer">
+        <div class="cxTransferTitle">${escapeHtml(transferStation)}</div>
+        <div class="cxTransferMeta">
+          ${waitMin==null ? "Correspondance" : `Correspondance · ${escapeHtml(minutesToHuman(waitMin))}`}
+        </div>
+      </div>
+    `;
+
+    return legHtml + transferHtml;
+  }).join("");
+
+  const tabsHTML = `
+    <div class="cxTabs" id="cxTabs">
+      <button class="cxTabBtn is-active" type="button" data-tab="overview">Vue d’ensemble</button>
+      ${legs.map((leg, i)=>`<button class="cxTabBtn" type="button" data-tab="leg${i}">${escapeHtml(leg.route?.id || "")}</button>`).join("")}
+    </div>
+  `;
+
+  return `
+    <div class="cxSummary">
+      ${summaryHTML}
+    </div>
+    ${tabsHTML}
+    <div id="modalTimelineHost"></div>
+  `;
+}
+
+function bindModalTabs(){
+  const tabs = document.getElementById("cxTabs");
+  if(!tabs) return;
+
+  tabs.querySelectorAll(".cxTabBtn").forEach(btn=>{
+    btn.addEventListener("click", ()=>{
+      const tab = btn.dataset.tab;
+      if(!tab) return;
+
+      modalTab = tab;
+
+      tabs.querySelectorAll(".cxTabBtn").forEach(b=>b.classList.toggle("is-active", b === btn));
+
+      renderModalTab(modalTab);
+      requestAnimationFrame(() => {
+        updateUserBoundaryTimes();
+        layoutModalRail();
+        updateModalLive();
+      });
+    });
+  });
+}
+
+function renderModalTab(tab){
+  if(!modalTrip) return;
+
+  // ✅ direct => déjà rendu dans renderModalTimeline (avec toggles)
+  if(modalTrip.kind === "direct"){
+    bindModalToggles();
+    return;
+  }
+
+  const host = document.getElementById("modalTimelineHost");
+  if(!host) return;
+
+  const legs = Array.isArray(modalTrip.legs) && modalTrip.legs.length
+    ? modalTrip.legs
+    : [modalTrip.leg1, modalTrip.leg2].filter(Boolean);
+
+  // Helpers: rendu d’une ligne avec ARR au-dessus + DEP alignée (si pertinent)
+  function rowHTML(stop, isFirst, isLast, muted=false){
+    // ⚠️ Important: on ne déduit PAS origin/terminus uniquement via l'index.
+    // Certaines gares (y compris départ/terminus et certaines gares de correspondance)
+    // peuvent avoir *à la fois* une ARR et une DEP dans les données.
+    // On se base donc sur la présence des champs :
+    // - origin  = DEP seule
+    // - terminus= ARR seule
+    // - sinon   = intermédiaire => ARR au-dessus + DEP alignée (si pertinent)
+
+    const hasArr = !!stop.arr;
+    const hasDep = !!stop.dep;
+
+    const isOrigin = (hasDep && !hasArr);
+    const isTerminus = (hasArr && !hasDep);
+
+    let depAligned = "";
+    let arrAbove = "";
+
+    if(isOrigin){
+      depAligned = displayTime(stop.dep || stop.arr || "");
+      arrAbove = "";
+    } else if(isTerminus){
+      depAligned = displayTime(stop.arr || stop.dep || "");
+      arrAbove = "";
+    } else {
+      depAligned = displayTime(stop.dep || "");
+      arrAbove = displayTime(stop.arr || "");
+      // si une des 2 manque, on évite d’afficher "—" en doublon
+      if(!stop.arr) arrAbove = "";
+      if(!stop.dep && stop.arr) depAligned = displayTime(stop.arr || "");
+      if(!stop.dep && !stop.arr) depAligned = "—";
+    }
+
+    // Temps "progression" pour le live (doit matcher la logique ci-dessus)
+    const tMin = stopProgressMin(stop, isOrigin, isTerminus);
+
+    return `
+      <div class="vRow ${muted ? "is-muted" : ""}"
+        data-arr="${escapeHtml(stop.arr || "")}"
+        data-dep="${escapeHtml(stop.dep || "")}"
+        data-tmin="${tMin ?? ""}">
+        <div class="vTimeCell">
+          ${arrAbove ? `<div class="vArrTime">${escapeHtml(arrAbove)}</div>` : ""}
+          <div class="vDepTime">${escapeHtml(depAligned)}</div>
+        </div>
+        <div class="vLineCol"><span class="vDot"></span></div>
+        ${renderStationCell(stop)}
+      </div>
+    `;
+  }
+
+  function wrapHTML(inner){
+    return `
+      <div class="vWrap" id="modalVWrap">
+        <div class="vRail" id="modalRail"></div>
+        <div class="vLive" id="modalLiveDot"></div>
+        ${inner}
+      </div>
+    `;
+  }
+
+  // ------------- TAB: OVERVIEW (pas de boutons, mais ARR+DEP partout)
+  if(tab === "overview"){
+    const stops = [];
+    for(let i=0;i<legs.length;i++){
+      const leg = legs[i];
+      const segStops = buildStopsForLeg(leg.route, leg.iFrom, leg.iTo);
+      if(i === 0){
+        stops.push(...segStops);
+        continue;
+      }
+      const prevLeg = legs[i-1];
+      const transferStation = prevLeg.route?.schedule?.[prevLeg.iTo]?.station || "Correspondance";
+      const transferStop = {
+        station: transferStation,
+        arr: timeAtStopForArr(prevLeg.route, prevLeg.iTo) || null,
+        dep: timeAtStopForDep(leg.route, leg.iFrom) || null,
+        arrMin: toMinutes(timeAtStopForArr(prevLeg.route, prevLeg.iTo)),
+        depMin: toMinutes(timeAtStopForDep(leg.route, leg.iFrom))
+      };
+      if(stops.length){
+        stops[stops.length - 1] = transferStop;
+      } else {
+        stops.push(transferStop);
+      }
+      stops.push(...segStops.slice(1));
+    }
+
+    const html = stops.map((s, idx)=>{
+      const isFirst = (idx === 0);
+      const isLast  = (idx === stops.length - 1);
+      return rowHTML(s, isFirst, isLast, false);
+    }).join("");
+
+    host.innerHTML = wrapHTML(`<div id="userSegment">${html}</div>`);
+    return; // pas de toggles sur overview
+  }
+
+  // ------------- TAB: LEG1 / LEG2 (✅ boutons origine/destination + ARR/DEP)
+  const m = /^leg(\d+)$/.exec(tab);
+  const idx = m ? Number(m[1]) : -1;
+  const leg = legs[idx];
+  if(!leg) return;
+  const route = leg.route;
+  const iFrom  = leg.iFrom;
+  const iTo    = leg.iTo;
+
+  const { pre, mid, post } = buildModalStopsForLeg(route, iFrom, iTo);
+
+  const toggleRow = (kind, text) => `
+    <button class="vToggle" type="button" data-toggle="${escapeHtml(kind)}">
+      <span class="vTogglePlus">+</span>
+      <span class="vToggleText">${escapeHtml(text)}</span>
+    </button>
+  `;
+
+  const preLabel  = pre.length  ? pre[0].station : "";
+  const postLabel = post.length ? post[post.length-1].station : "";
+
+  const preHTML = pre.map((s, idx)=>{
+    // dans le fold, tout est "middle" (on veut ARR+DEP)
+    return rowHTML(s, false, false, true);
+  }).join("");
+
+  const midHTML = mid.map((s, idx)=>{
+    const isFirst = (idx === 0);
+    const isLast  = (idx === mid.length - 1);
+    return rowHTML(s, isFirst, isLast, false);
+  }).join("");
+
+  const postHTML = post.map((s, idx)=>{
+    return rowHTML(s, false, false, true);
+  }).join("");
+
+  host.innerHTML = wrapHTML(`
+    ${pre.length ? toggleRow("pre", `Itinéraire depuis ${preLabel}`) : ""}
+    <div class="vFold" id="foldPre" hidden>${preHTML}</div>
+
+    <div id="userSegment">${midHTML}</div>
+
+    ${post.length ? toggleRow("post", `Itinéraire jusqu’à ${postLabel}`) : ""}
+    <div class="vFold" id="foldPost" hidden>${postHTML}</div>
+  `);
+
+  // ✅ IMPORTANT: boutons origine/destination (uniquement sur tabs train)
+  bindModalToggles();
+}
+
+function getAllModalStopRows(){
+  const wrap = $("modalVWrap");
+  if(!wrap) return [];
+  return Array.from(wrap.querySelectorAll(".vRow"));
+}
+
+function getAllModalRowsVisible(){
+  const wrap = $("modalVWrap");
+  if(!wrap) return [];
+
+  const rows = [];
+
+  // si pre est ouvert → on inclut pre
+  const pre = $("foldPre");
+  if(pre && !pre.hasAttribute("hidden")){
+    rows.push(...pre.querySelectorAll(".vRow"));
+  }
+
+  // segment utilisateur TOUJOURS inclus
+  const user = wrap.querySelector("#userSegment");
+  if(user){
+    rows.push(...user.querySelectorAll(".vRow"));
+  }
+
+  // si post est ouvert → on inclut post
+  const post = $("foldPost");
+  if(post && !post.hasAttribute("hidden")){
+    rows.push(...post.querySelectorAll(".vRow"));
+  }
+
+  return rows;
+}
+
+function layoutModalRail(){
+  const wrap = $("modalVWrap");
+  const rail = $("modalRail");
+  if(!wrap || !rail) return;
+
+  const rows = getAllModalRowsVisible();
+  if(rows.length < 2) return;
+
+  const wrapRect = wrap.getBoundingClientRect();
+  const firstDot = rows[0].querySelector(".vDot");
+  const lastDot  = rows[rows.length - 1].querySelector(".vDot");
+  if(!firstDot || !lastDot) return;
+
+  const a = firstDot.getBoundingClientRect();
+  const b = lastDot.getBoundingClientRect();
+
+  const yTop = (a.top + a.bottom)/2 - wrapRect.top;
+  const yBot = (b.top + b.bottom)/2 - wrapRect.top;
+
+  rail.style.top = `${yTop}px`;
+  rail.style.height = `${Math.max(0, yBot - yTop)}px`;
+}
+
+function bindModalToggles(){
+  const wrap = $("modalVWrap");
+  if(!wrap) return;
+
+  const overlay = $("modalOverlay");
+  const modalEl = overlay ? overlay.querySelector(".modal") : null; // scroll container
+
+  wrap.querySelectorAll(".vToggle").forEach(btn=>{
+    btn.addEventListener("click", ()=>{
+      const kind = btn.dataset.toggle; // "pre" | "post"
+      const fold = (kind === "pre") ? $("foldPre") : $("foldPost");
+      if(!fold) return;
+
+      const opening = fold.hasAttribute("hidden");
+
+      if(opening){
+        fold.removeAttribute("hidden");
+
+        // ✅ IMPORTANT: pour "post", on met le bouton APRES le fold → il finit en bas
+        if(kind === "post"){
+          fold.after(btn);
+        }
+      } else {
+        fold.setAttribute("hidden","");
+
+        // ✅ quand on referme "post", on remet le bouton AVANT le fold (sa position “fermée”)
+        if(kind === "post"){
+          fold.before(btn);
+        }
+      }
+
+      // + => − quand ouvert
+      const plus = btn.querySelector(".vTogglePlus");
+      if(plus) plus.textContent = opening ? "−" : "+";
+
+      requestAnimationFrame(()=>{
+        updateUserBoundaryTimes();
+        layoutModalRail();
+        updateModalLive();
+
+        // petit bonus UX: quand on ouvre "post", on scroll pour voir le bas
+        if(opening && kind === "post" && modalEl){
+          modalEl.scrollTo({ top: modalEl.scrollHeight, behavior: "smooth" });
+        }
+      });
+    });
+  });
+}
+
+function updateModalLive(){
+  if(!modalOpen || !modalTrip) return;
+
+  const wrap = $("modalVWrap");
+  const dot  = $("modalLiveDot");
+  const rail = $("modalRail");
+  if(!wrap || !dot || !rail) return;
+
+  const now = nowSeconds();
+
+  // uniquement les rows VRAIMENT visibles (fold hidden => offsetParent null)
+  const rows = getAllModalRowsVisible().filter(r => r.offsetParent !== null);
+  if(rows.length < 2){
+    wrap.classList.remove("is-live");
+    return;
+  }
+
+  const wrapRect = wrap.getBoundingClientRect();
+  const railRect = rail.getBoundingClientRect();
+  const halfDot = 0; // on autorise le centre du live à atteindre railTop/railBottom
+
+  const railTop = railRect.top - wrapRect.top;
+  const railBottom = railRect.bottom - wrapRect.top;
+
+  // stops: y = centre du rond, arr/dep en secondes
+  const stops = rows.map(row=>{
+    const dotEl = row.querySelector(".vDot");
+    if(!dotEl) return null;
+
+    const dr = dotEl.getBoundingClientRect();
+    const y = ((dr.top + dr.bottom) / 2) - wrapRect.top;
+
+    const arr = row.dataset.arr || "";
+    const dep = row.dataset.dep || "";
+
+    return {
+      y,
+      arrSec: toSeconds(arr),
+      depSec: toSeconds(dep)
+    };
+  }).filter(Boolean);
+
+  if(stops.length < 2){
+    wrap.classList.remove("is-live");
+    return;
+  }
+
+  // Fenêtre live = du PREMIER départ réel au DERNIER arrivée réelle
+  const firstDep = stops.find(s => s.depSec != null);
+  const lastArr = [...stops].reverse().find(s => s.arrSec != null);
+
+  if(!firstDep || !lastArr){
+    wrap.classList.remove("is-live");
+    return;
+  }
+
+  const liveOk = (now >= firstDep.depSec && now <= lastArr.arrSec);
+  wrap.classList.toggle("is-live", liveOk);
+  if(!liveOk) return;
+
+  // 1) pause à quai (immobile) : entre arr et dep
+  for(const s of stops){
+    if(s.arrSec != null && s.depSec != null){
+      if(now >= s.arrSec && now < s.depSec){
+        let y = s.y;
+        y = clamp(y, railTop + halfDot, railBottom - halfDot);
+        dot.style.top = `${y}px`;
+        return;
+      }
+    }
+  }
+
+  // 2) en trajet : entre dep(A) et arr(B)
+  for(let i=0; i<stops.length-1; i++){
+    const A = stops[i];
+    const B = stops[i+1];
+
+    if(A.depSec == null || B.arrSec == null) continue;
+
+    if(now >= A.depSec && now <= B.arrSec){
+      const span = Math.max(0.001, B.arrSec - A.depSec);
+      const pct = clamp((now - A.depSec) / span, 0, 1);
+
+      let y = A.y + pct * (B.y - A.y);
+      y = clamp(y, railTop + halfDot, railBottom - halfDot);
+      dot.style.top = `${y}px`;
+      return;
+    }
+  }
+
+  // fallback clamp (rare)
+  let y = stops[0].y;
+  y = clamp(y, railTop + halfDot, railBottom - halfDot);
+  dot.style.top = `${y}px`;
+}
+
+function computeModalGeometry(){
+  const wrap = $("modalVWrap");
+  if(!wrap) return null;
+
+  // On aligne sur le segment utilisateur (mid)
+  const userSeg = wrap.querySelector("#userSegment");
+  if(!userSeg) return null;
+
+  const dots = userSeg.querySelectorAll(".vDot");
+  if(!dots.length) return null;
+
+  const first = dots[0];
+  const last = dots[dots.length - 1];
+
+  const wrapRect = wrap.getBoundingClientRect();
+  const a = first.getBoundingClientRect();
+  const b = last.getBoundingClientRect();
+
+  // X = centre du premier dot (réel) => live sera parfaitement aligné
+  const x = (a.left + a.right) / 2 - wrapRect.left;
+
+  // Y bornes = centres des dots first/last (réels)
+  const yStart = (a.top + a.bottom) / 2 - wrapRect.top;
+  const yEnd   = (b.top + b.bottom) / 2 - wrapRect.top;
+
+  return { x, yStart, yEnd };
+}
+
+/* ============================
+   LIVE animation (horizontal + modal vertical)
+   ============================ */
+function updateLiveDots(){
+  const now = nowSeconds();
+  const nowMin = now / 60;
+
+  document.querySelectorAll(".trip").forEach(card=>{
+    const dep = card.dataset.depsec ? Number(card.dataset.depsec) : null;
+    const arr = card.dataset.arrsec ? Number(card.dataset.arrsec) : null;
+
+    const isLiveNow = (dep != null && arr != null && now >= dep && now <= arr);
+    const isPastNow = (arr != null && now > arr);
+
+    card.classList.toggle("is-live", isLiveNow);
+    card.classList.toggle("is-past", isPastNow);
+
+    const liveDot = card.querySelector(".rail__live");
+    if(liveDot && dep != null && arr != null && arr > dep){
+      let pct = null;
+
+      const tripId = String(card.dataset.tripindex ?? "");
+      const trip = resolveTripFromCardId(tripId);
+
+      if(trip && trip.kind === "change" && Array.isArray(trip.legs) && trip.legs.length >= 2){
+        const legs = trip.legs;
+        let percents = Array.isArray(trip.stopPercents) ? trip.stopPercents.slice() : [];
+        if(percents.length !== legs.length - 1){
+          percents = transferPercentsForLegs(legs);
+        }
+
+        const mins = legs.map(l => ({
+          dep: l.depMinAbs ?? l.depMinRaw ?? l.depMin ?? null,
+          arr: l.arrMinAbs ?? l.arrMinRaw ?? l.arrMin ?? null
+        }));
+
+        // attente aux correspondances
+        for(let i=0;i<mins.length-1;i++){
+          const a = mins[i]?.arr;
+          const d = mins[i+1]?.dep;
+          if(a == null || d == null) continue;
+          if(nowMin >= a && nowMin < d){
+            pct = percents[i] ?? null;
+            break;
+          }
+        }
+
+        // en trajet
+        if(pct == null){
+          for(let i=0;i<mins.length;i++){
+            const m = mins[i];
+            if(m.dep == null || m.arr == null) continue;
+            if(nowMin >= m.dep && nowMin <= m.arr){
+              const start = (i === 0) ? 0 : (percents[i-1] ?? 0);
+              const end = (i === mins.length-1) ? 100 : (percents[i] ?? 100);
+              const span = Math.max(0.001, m.arr - m.dep);
+              const p = clamp((nowMin - m.dep) / span, 0, 1);
+              pct = start + p * (end - start);
+              break;
+            }
+          }
+        }
+      }
+
+      if(pct == null){
+        pct = ((now - dep) / (arr - dep)) * 100;
+      }
+
+      pct = clamp(pct, 0, 100);
+
+      // CLAMP VISUEL: avec translateX(-50%), 0% et 100% débordent forcément.
+      // On clamp donc à [halfDot/railWidth, 100 - halfDot/railWidth].
+      const rail = card.querySelector(".rail");
+      if(rail){
+        const railW = rail.getBoundingClientRect().width;
+        const dotW  = liveDot.getBoundingClientRect().width || 10;
+        if(railW > 0){
+          const halfDotPct = (dotW / 2) / railW * 100;
+          pct = clamp(pct, halfDotPct, 100 - halfDotPct);
+        }
+      }
+
+      liveDot.style.left = pct + "%";
+    }
+  });
+
+  updateModalLive();
+
+  liveRAF = requestAnimationFrame(updateLiveDots);
+}
+
+function startLiveAnimation(){
+  if(liveRAF != null) cancelAnimationFrame(liveRAF);
+  liveRAF = requestAnimationFrame(updateLiveDots);
+}
+
+/* ============================
+   SEARCH FLOW
+   ============================ */
+function currentQuery(){
+  return {
+    from: ($("from")?.value || "").trim(),
+    to: ($("to")?.value || "").trim()
+  };
+}
+
+function search(){
+  const { from, to } = currentQuery();
+  function bestStationName(raw){
+    return bestStationGuess(raw);
+  }
+
+  const fromFix = bestStationName(from);
+  const toFix   = bestStationName(to);
+
+  if(fromFix) $("from").value = fromFix;
+  if(toFix)   $("to").value = toFix;
+  if(!from || !to){
+    renderAllRoutes();
+    return;
+  }
+
+  // Référence date+heure choisie
+  const q = queryReference();
+  const minAllowed = new Date(q.today0.getTime() - 14*24*60*60*1000);
+  const maxAllowed = addMonthsLocal(q.today0, 6);
+
+  // si l'utilisateur choisit une date trop ancienne / trop loin dans le futur,
+  // on refuse pour éviter des listes énormes
+  if(q.selDate < minAllowed || q.selDate > maxAllowed){
+    const status = $("status");
+    if(status){
+      status.textContent = `❌ Date hors limite. Choisis une date entre ${formatDateFrParis(minAllowed)} et ${formatDateFrParis(maxAllowed)}.`;
+    }
+    const results = $("results");
+    if(results) results.innerHTML = "";
+    lastRenderedTrips = [];
+    lastPastTrips = [];
+    return;
+  }
+
+  applyEffectiveRoutes(q.selDate);
+  lastQueryRef = { selDate: q.selDate, nowMin: q.nowMin, isToday: q.isToday };
+
+  const direct = findDirect(from, to);
+  const nowMin = q.nowMin;
+
+  // correspondances: on essaie 1, puis 2, puis 3... jusqu’à trouver
+  const changes = findBestConnections(from, to, nowMin);
+
+  let trips = buildTrips(direct, changes);
+  trips = filterTripsByDeparture(trips);
+  trips = filterTripsByArrivalKeepLatest(trips);
+  trips = filterTripsByArrivalClockKeepLatest(trips);
+  trips = filterTripsBySameDepArr(trips);
+  trips = filterTripsByDominance(trips);
+  trips = reinjectAllDirectOptions(trips, direct);
+  trips = ensureOneDirectOption(trips, direct, nowMin);
+  renderTrips(trips, from, to);
+}
+
+function swapInputs(){
+  const a = $("from");
+  const b = $("to");
+  if(!a || !b) return;
+  [a.value, b.value] = [b.value, a.value];
+  search();
+}
+
+/* ============================
+   INIT
+   ============================ */
+(async function init(){
+  const status = $("status");
+  try{
+    if(status) status.textContent = "Chargement des routes…";
+    await loadRoutes();
+    initHeaderMenu();
+
+    // bindSuggest($("from"), $("fromSuggest"));
+    // bindSuggest($("to"), $("toSuggest"));
+
+    $("searchBtn")?.addEventListener("click", search);
+    $("swapBtn")?.addEventListener("click", swapInputs);
+
+    const fromInput = $("from");
+    const toInput = $("to");
+
+    fromInput?.addEventListener("pointerdown", ()=>{
+      fromInput.value = "";
+    });
+    toInput?.addEventListener("pointerdown", ()=>{
+      toInput.value = "";
+    });
+
+    $("from")?.addEventListener("focus", (e)=>{ window.__fr_closeDateOverlay?.(); openStationPicker(e.target); });
+    $("to")?.addEventListener("focus", (e)=>{ window.__fr_closeDateOverlay?.(); openStationPicker(e.target); });
+
+    $("from")?.addEventListener("keydown", (e)=>{ if(e.key==="Enter") search(); });
+    $("to")?.addEventListener("keydown", (e)=>{ if(e.key==="Enter") search(); });
+
+    $("stationCloseBtn")?.addEventListener("click", closeStationPicker);
+
+    $("stationOverlay")?.addEventListener("mousedown", (e)=>{
+      const sheet = e.currentTarget.querySelector(".stationSheet");
+      if(sheet && !sheet.contains(e.target)) closeStationPicker();
+    });
+
+    $("stationSearchInput")?.addEventListener("input", (e)=>{
+      renderStationList(e.target.value);
+    });
+
+    // Entrée => valide meilleur guess (ou si une seule gare filtrée)
+    $("stationSearchInput")?.addEventListener("keydown", (e)=>{
+      if(e.key === "Escape"){
+        e.preventDefault();
+        closeStationPicker();
+        return;
+      }
+      if(e.key === "Enter"){
+        e.preventDefault();
+
+        const raw = e.target.value;
+        const guess = bestStationGuess(raw);
+
+        if(guess && stationPickerTarget){
+          stationPickerTarget.value = guess;
+          closeStationPicker();
+          return;
+        }
+
+        // fallback: si le filtre renvoie 1 seul item visible, prendre celui-là
+        const firstItem = $("stationList")?.querySelector(".stationItem");
+        if(firstItem && stationPickerTarget){
+          stationPickerTarget.value = firstItem.dataset.station || "";
+          closeStationPicker();
+        }
+      }
+    });
+
+    $("mockTime")?.addEventListener("input", ()=>{
+      // refresh list (home or search)
+      const { from, to } = currentQuery();
+      if(from && to) search();
+      else renderAllRoutes();
+    });
+
+    // Par défaut: aujourd'hui
+    const md = $("mockDate");
+    if(md && !String(md.value||"").trim()){
+      md.value = formatIsoUTC(parisTodayUTC());
+    }
+
+    $("mockDate")?.addEventListener("input", ()=>{
+      const { from, to } = currentQuery();
+      if(from && to) search();
+      else renderAllRoutes();
+    });
+
+    bindModalEvents();
+
+    // Si on arrive depuis l’accueil, on peut avoir ?from=...&to=...&time=...&date=...
+    const params = new URLSearchParams(window.location.search);
+    const pFrom = params.get("from") || "";
+    const pTo = params.get("to") || "";
+    const pTime = params.get("time") || "";
+    const pDate = params.get("date") || "";
+
+    if(pFrom) $("from").value = pFrom;
+    if(pTo) $("to").value = pTo;
+    if(pTime) $("mockTime").value = pTime;
+    if(pDate) $("mockDate").value = pDate;
+
+    if(pFrom && pTo) search();
+    else renderAllRoutes();
+  } catch(err){
+    console.error(err);
+    if(status) status.textContent = `Erreur: ${err.message}`;
+    $("results").innerHTML = "";
+  }
+})();
+
+
+
+/* =========================================================
+   DATE PICKER OVERLAY (horaires) — inspiré VR.fi
+   - s’appuie sur #mockDate (hidden) et #mockTime
+   - met à jour le libellé du bouton + navigation jour -/+ en bas
+   ========================================================= */
+(function initDateOverlayHoraires(){
+  const $ = (id)=>document.getElementById(id);
+  const overlay = $("dateOverlay");
+  const btn = $("dateBtn");
+  const btnLabel = $("dateBtnLabel");
+  const closeBtn = $("dateCloseBtn");
+  const applyBtn = $("dateApplyBtn");
+  const monthSel = $("dateMonthSelect");
+  const daySel = $("dateDaySelect");
+  const md = $("mockDate");
+  const mt = $("mockTime");
+
+  if(!overlay || !btn || !btnLabel || !closeBtn || !applyBtn || !monthSel || !daySel || !md || !mt) return;
+
+  const prevBtn = $("dayPrevBtn");
+  const nextBtn = $("dayNextBtn");
+
+  const LS_DATE = "fr_date";
+  const LS_TIME = "fr_time";
+
+  const fmtMonth = new Intl.DateTimeFormat("fr-FR", { timeZone: PARIS_TZ, month:"long", year:"numeric" });
+  const fmtDow = new Intl.DateTimeFormat("fr-FR", { timeZone: PARIS_TZ, weekday:"short" });
+
+  function isoDate(d){
+    const y = d.getUTCFullYear();
+    const m = String(d.getUTCMonth()+1).padStart(2,"0");
+    const da = String(d.getUTCDate()).padStart(2,"0");
+    return `${y}-${m}-${da}`;
+  }
+  function startOfDay(d){
+    return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 0, 0, 0, 0));
+  }
+  function addDays(d, n){
+    const x = new Date(d);
+    x.setUTCDate(x.getUTCDate()+n);
+    return x;
+  }
+  function addMonths(d, n){
+    const x = new Date(d);
+    x.setUTCMonth(x.getUTCMonth()+n);
+    return x;
+  }
+  function limits(){
+    const today = parisTodayUTC();
+    const min = addDays(today, -14);
+    const max = addMonths(today, 6);
+    return { today, min, max };
+  }
+  function clampDate(d){
+    const { min, max } = limits();
+    if(d < min) return new Date(min);
+    if(d > max) return new Date(max);
+    return d;
+  }
+
+  function getISOWeek(date){
+    const d = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()));
+    const dayNum = d.getUTCDay() || 7;
+    d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+    const yearStart = new Date(Date.UTC(d.getUTCFullYear(),0,1));
+    return Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+  }
+
+  function parseSelectedDate(){
+    const raw = (md.value || "").trim();
+    if(raw){
+      const d = parseLocalDate(raw);
+      if(d) return d;
+    }
+    const saved = localStorage.getItem(LS_DATE);
+    if(saved){
+      const d = parseLocalDate(saved);
+      if(d) return d;
+    }
+    return parisTodayUTC();
+  }
+
+  function setSelectedDate(d){
+    const dd = clampDate(startOfDay(d));
+    md.value = isoDate(dd);
+    localStorage.setItem(LS_DATE, md.value);
+    updateBtnLabel();
+    updateDayNavState();
+  }
+
+  function updateBtnLabel(){
+    const sel = parseSelectedDate();
+    btnLabel.textContent = `${sel.getUTCDate()}.${sel.getUTCMonth()+1}.${sel.getUTCFullYear()}`;
+  }
+
+  function open(){
+    window.__fr_closeStationPicker?.();
+    overlay.hidden = false;
+    refreshOverlayBodyClass();
+    renderMonths();
+    syncPickersFromDate(parseSelectedDate());
+  }
+  function close(){
+    overlay.hidden = true;
+    refreshOverlayBodyClass();
+  }
+
+  function renderMonths(){
+    const { min, max } = limits();
+    monthSel.innerHTML = "";
+    const cursor = new Date(Date.UTC(min.getUTCFullYear(), min.getUTCMonth(), 1, 0, 0, 0, 0));
+    const end = new Date(Date.UTC(max.getUTCFullYear(), max.getUTCMonth(), 1, 0, 0, 0, 0));
+
+    while(cursor <= end){
+      const y = cursor.getUTCFullYear();
+      const m = cursor.getUTCMonth()+1;
+      const opt = document.createElement("option");
+      opt.value = `${y}-${String(m).padStart(2,"0")}`;
+      opt.textContent = fmtMonth.format(cursor).replace(/^\w/, c=>c.toUpperCase());
+      monthSel.appendChild(opt);
+      cursor.setUTCMonth(cursor.getUTCMonth()+1);
+    }
+  }
+
+  function renderDaysForMonth(year, month){
+    const { min, max } = limits();
+    daySel.innerHTML = "";
+    const first = dateUTCFromYmd(year, month, 1);
+    const last = new Date(Date.UTC(year, month, 0, 0, 0, 0, 0));
+    let cursor = first;
+    let lastWeek = null;
+
+    while(cursor <= last){
+      const d0 = startOfDay(cursor);
+      if(d0 >= min && d0 <= max){
+        const week = getISOWeek(d0);
+        if(lastWeek !== null && week !== lastWeek){
+          const sep = document.createElement("option");
+          sep.disabled = true;
+          sep.textContent = "────────";
+          sep.className = "weekSep";
+          daySel.appendChild(sep);
+        }
+        lastWeek = week;
+
+        const opt = document.createElement("option");
+        opt.value = isoDate(d0);
+        const wd = fmtDow.format(d0);
+        opt.textContent = `${d0.getUTCDate()}. ${wd}`;
+        daySel.appendChild(opt);
+      }
+      cursor = addDays(cursor, 1);
+    }
+  }
+
+  function syncPickersFromDate(sel){
+    const y = sel.getUTCFullYear();
+    const m = sel.getUTCMonth()+1;
+    const mv = `${y}-${String(m).padStart(2,"0")}`;
+    monthSel.value = mv;
+    renderDaysForMonth(y, m);
+    const dv = isoDate(sel);
+    const opt = [...daySel.options].find(o=>o.value===dv);
+    if(opt) daySel.value = dv;
+    else{
+      const firstValid = [...daySel.options].find(o=>!o.disabled);
+      if(firstValid) daySel.value = firstValid.value;
+    }
+  }
+
+  function updateDayNavState(){
+    if(!prevBtn || !nextBtn) return;
+    const { min, max } = limits();
+    const sel = parseSelectedDate();
+    const prev = addDays(sel,-1);
+    const next = addDays(sel, 1);
+    prevBtn.disabled = startOfDay(prev) < min;
+    nextBtn.disabled = startOfDay(next) > max;
+  }
+
+  // init
+  setSelectedDate(parseSelectedDate());
+  const savedTime = localStorage.getItem(LS_TIME);
+  if(savedTime && !mt.value) mt.value = savedTime;
+
+  // button + overlay
+  btn.addEventListener("click", (e)=>{ e.preventDefault(); open(); });
+  closeBtn.addEventListener("click", (e)=>{ e.preventDefault(); close(); });
+
+  // expose for other overlays
+  window.__fr_closeDateOverlay = close;
+
+  overlay.addEventListener("mousedown", (e)=>{
+    const sheet = overlay.querySelector(".dateSheet");
+    if(sheet && !sheet.contains(e.target)) close();
+  });
+
+  document.addEventListener("keydown", (e)=>{
+    if(e.key === "Escape" && !overlay.hidden){
+      e.preventDefault();
+      close();
+    }
+  });
+
+  monthSel.addEventListener("change", ()=>{
+    const [yS,mS] = monthSel.value.split("-");
+    const y = Number(yS), m = Number(mS);
+    renderDaysForMonth(y,m);
+    const firstValid = [...daySel.options].find(o=>!o.disabled);
+    if(firstValid) daySel.value = firstValid.value;
+  });
+
+  daySel.addEventListener("change", ()=>{
+    if(daySel.value){
+      const d = parseLocalDate(daySel.value);
+      if(d) setSelectedDate(d);
+    }
+  });
+
+  overlay.querySelectorAll(".quickBtn").forEach(b=>{
+    b.addEventListener("click", ()=>{
+      const q = b.dataset.quick;
+      const { today } = limits();
+      if(q==="today") setSelectedDate(today);
+      if(q==="tomorrow") setSelectedDate(addDays(today,1));
+      if(q==="after") setSelectedDate(addDays(today,2));
+      syncPickersFromDate(parseSelectedDate());
+    });
+  });
+
+  applyBtn.addEventListener("click", ()=>{
+    const v = daySel.value;
+    if(v){
+      const d = parseLocalDate(v);
+      if(d) setSelectedDate(d);
+      close();
+      // relance la recherche avec la même requête
+      try{ search(); } catch {}
+    }
+  });
+
+  mt.addEventListener("input", ()=>{
+    localStorage.setItem(LS_TIME, mt.value || "");
+  });
+
+  // navigation jour précédent/suivant (en bas des résultats)
+  if(prevBtn){
+    prevBtn.addEventListener("click", ()=>{
+      const sel = parseSelectedDate();
+      setSelectedDate(addDays(sel,-1));
+      try{ search(); } catch {}
+      window.scrollTo({ top: document.getElementById("timetables")?.offsetTop || 0, behavior:"smooth" });
+    });
+  }
+  if(nextBtn){
+    nextBtn.addEventListener("click", ()=>{
+      const sel = parseSelectedDate();
+      setSelectedDate(addDays(sel, 1));
+      try{ search(); } catch {}
+      window.scrollTo({ top: document.getElementById("timetables")?.offsetTop || 0, behavior:"smooth" });
+    });
+  }
+
+})();

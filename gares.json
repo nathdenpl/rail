@@ -1,0 +1,163 @@
+{
+    "gares": [
+        {
+            "name": "Able"
+        },
+        {
+            "name": "Allèse"
+        },
+        {
+            "name": "Antourun"
+        },
+        {
+            "name": "Ardon"
+        },
+        {
+            "name": "Belle-Napolie"
+        },
+        {
+            "name": "Bourg-en-Napolie"
+        },
+        {
+            "name": "Bourg-sur-Chamoson"
+        },
+        {
+            "name": "Briançon"
+        },
+        {
+            "name": "Brigue"
+        },
+        {
+            "name": "Calendre"
+        },
+        {
+            "name": "Chamoson"
+        },
+        {
+            "name": "Chevalier Danceny"
+        },
+        {
+            "name": "Châteaunaples"
+        },
+        {
+            "name": "Châteauroux-les-Alpes"
+        },
+        {
+            "name": "Châtillon-sur-Rhône"
+        },
+        {
+            "name": "Clages"
+        },
+        {
+            "name": "Contres"
+        },
+        {
+            "name": "Devoise"
+        },
+        {
+            "name": "Etroubles"
+        },
+        {
+            "name": "Fairfax"
+        },
+        {
+            "name": "Fendre"
+        },
+        {
+            "name": "Ferré-Valmontagne"
+        },
+        {
+            "name": "Fraise"
+        },
+        {
+            "name": "Gresses"
+        },
+        {
+            "name": "Isérables"
+        },
+        {
+            "name": "Ivy-les-Bains"
+        },
+        {
+            "name": "Lagnieu"
+        },
+        {
+            "name": "Loèche-les-Bains"
+        },
+        {
+            "name": "Lucerne"
+        },
+        {
+            "name": "Manor"
+        },
+        {
+            "name": "Martigny"
+        },
+        {
+            "name": "Meunier-le-Brigois"
+        },
+        {
+            "name": "Montres Neuveville"
+        },
+        {
+            "name": "Montres Renart"
+        },
+        {
+            "name": "Nus"
+        },
+        {
+            "name": "Paixe"
+        },
+        {
+            "name": "Pont-Saint-Martin"
+        },
+        {
+            "name": "Porte-lès-Briançon"
+        },
+        {
+            "name": "Quart"
+        },
+        {
+            "name": "Raron"
+        },
+        {
+            "name": "Riddes"
+        },
+        {
+            "name": "Rêtre"
+        },
+        {
+            "name": "Saint-Léonard"
+        },
+        {
+            "name": "Saint-Maurice"
+        },
+        {
+            "name": "Saint-Vincent"
+        },
+        {
+            "name": "Sierre"
+        },
+        {
+            "name": "Sion"
+        },
+        {
+            "name": "Strèse"
+        },
+        {
+            "name": "Sursée"
+        },
+        {
+            "name": "Troisfontaines"
+        },
+        {
+            "name": "Troussay"
+        },
+        {
+            "name": "Vescovade"
+        },
+        {
+            "name": "Viège"
+        }
+    ]
+}
