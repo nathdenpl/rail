@@ -5036,7 +5036,7 @@
       "id": "RE64",
       "line": "RE",
       "schedule": [
-        { "station": "Vescovade", "arr": "22:40", "dep": "22:40", "Voie": null },
+        { "station": "Vescovade", "arr": null, "dep": "22:40", "Voie": null },
         { "station": "Able", "arr": "22:47", "dep": "22:48", "Voie": null },
         { "station": "Brigue", "arr": "22:58", "dep": "23:00", "Voie": null },
         { "station": "Chevalier Danceny", "arr": "23:04", "dep": "23:05", "Voie": null },
