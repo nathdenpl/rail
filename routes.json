@@ -681,6 +681,24 @@
       ]
     },
     {
+      "id": "IC89",
+      "line": "IC89",
+      "schedule": [
+        { "station": "Viège", "arr": null, "dep": "16:16", "Voie": null },
+        { "station": "Brigue", "arr": "16:47", "dep": "16:50", "Voie": null },
+        { "station": "Vescovade", "arr": "17:05", "dep": null, "Voie": null }
+      ]
+    },
+    {
+      "id": "IC90",
+      "line": "IC90",
+      "schedule": [
+        { "station": "Vescovade", "arr": null, "dep": "10:02", "Voie": null },
+        { "station": "Brigue", "arr": "10:17", "dep": "10:21", "Voie": null },
+        { "station": "Viège", "arr": "10:52", "dep": null, "Voie": null }
+      ]
+    },
+    {
       "id": "IR121",
       "line": "IR121",
       "schedule": [
@@ -3800,8 +3818,8 @@
       "id": "IR831",
       "line": "IR831",
       "schedule": [
-        { "station": "Brigue", "arr": null, "dep": "15:39", "Voie": null },
-        { "station": "Vescovade", "arr": "15:54", "dep": null, "Voie": null }
+        { "station": "Brigue", "arr": null, "dep": "7:04", "Voie": null },
+        { "station": "Vescovade", "arr": "7:19", "dep": null, "Voie": null }
       ]
     },
     {
@@ -3816,8 +3834,8 @@
       "id": "IR833",
       "line": "IR833",
       "schedule": [
-        { "station": "Brigue", "arr": null, "dep": "16:50", "Voie": null },
-        { "station": "Vescovade", "arr": "17:05", "dep": null, "Voie": null }
+        { "station": "Brigue", "arr": null, "dep": "15:39", "Voie": null },
+        { "station": "Vescovade", "arr": "15:54", "dep": null, "Voie": null }
       ]
     },
     {
@@ -5036,7 +5054,7 @@
       "id": "RE64",
       "line": "RE",
       "schedule": [
-        { "station": "Vescovade", "arr": null, "dep": "22:40", "Voie": null },
+        { "station": "Vescovade", "arr": "22:40", "dep": "22:40", "Voie": null },
         { "station": "Able", "arr": "22:47", "dep": "22:48", "Voie": null },
         { "station": "Brigue", "arr": "22:58", "dep": "23:00", "Voie": null },
         { "station": "Chevalier Danceny", "arr": "23:04", "dep": "23:05", "Voie": null },
