@@ -3797,6 +3797,38 @@
       ]
     },
     {
+      "id": "IR831",
+      "line": "IR831",
+      "schedule": [
+        { "station": "Brigue", "arr": null, "dep": "15:39", "Voie": null },
+        { "station": "Vescovade", "arr": "15:54", "dep": null, "Voie": null }
+      ]
+    },
+    {
+      "id": "IR832",
+      "line": "IR832",
+      "schedule": [
+        { "station": "Vescovade", "arr": null, "dep": "12:18", "Voie": null },
+        { "station": "Brigue", "arr": "12:33", "dep": null, "Voie": null }
+      ]
+    },
+    {
+      "id": "IR833",
+      "line": "IR833",
+      "schedule": [
+        { "station": "Brigue", "arr": null, "dep": "16:50", "Voie": null },
+        { "station": "Vescovade", "arr": "17:05", "dep": null, "Voie": null }
+      ]
+    },
+    {
+      "id": "IR834",
+      "line": "IR834",
+      "schedule": [
+        { "station": "Vescovade", "arr": null, "dep": "18:09", "Voie": null },
+        { "station": "Brigue", "arr": "18:24", "dep": null, "Voie": null }
+      ]
+    },
+    {
       "id": "RE1",
       "line": "RE",
       "schedule": [
