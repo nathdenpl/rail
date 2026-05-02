@@ -699,6 +699,118 @@
       ]
     },
     {
+      "id": "IC91",
+      "line": "IC91",
+      "schedule": [
+        { "station": "Brigue", "arr": null, "dep": "7:57", "Voie": null },
+        { "station": "Vescovade", "arr": "8:12", "dep": null, "Voie": null }
+      ]
+    },
+    {
+      "id": "IC92",
+      "line": "IC92",
+      "schedule": [
+        { "station": "Vescovade", "arr": null, "dep": "17:15", "Voie": null },
+        { "station": "Brigue", "arr": "17:30", "dep": null, "Voie": null }
+      ]
+    },
+    {
+      "id": "IC93",
+      "line": "IC93",
+      "schedule": [
+        { "station": "Brigue", "arr": null, "dep": "9:35", "Voie": null },
+        { "station": "Vescovade", "arr": "9:50", "dep": null, "Voie": null }
+      ]
+    },
+    {
+      "id": "IC94",
+      "line": "IC94",
+      "schedule": [
+        { "station": "Vescovade", "arr": null, "dep": "20:09", "Voie": null },
+        { "station": "Brigue", "arr": "20:24", "dep": null, "Voie": null }
+      ]
+    },
+    {
+      "id": "IR111",
+      "line": "IR111",
+      "schedule": [
+        { "station": "Brigue", "arr": null, "dep": "4:20", "Voie": null },
+        { "station": "Vescovade", "arr": "4:35", "dep": null, "Voie": null }
+      ]
+    },
+    {
+      "id": "IR112",
+      "line": "IR112",
+      "schedule": [
+        { "station": "Vescovade", "arr": null, "dep": "9:45", "Voie": null },
+        { "station": "Brigue", "arr": "10:00", "dep": null, "Voie": null }
+      ]
+    },
+    {
+      "id": "IR113",
+      "line": "IR113",
+      "schedule": [
+        { "station": "Brigue", "arr": null, "dep": "5:30", "Voie": null },
+        { "station": "Vescovade", "arr": "5:45", "dep": null, "Voie": null }
+      ]
+    },
+    {
+      "id": "IR114",
+      "line": "IR114",
+      "schedule": [
+        { "station": "Vescovade", "arr": null, "dep": "13:55", "Voie": null },
+        { "station": "Brigue", "arr": "14:10", "dep": null, "Voie": null }
+      ]
+    },
+    {
+      "id": "IR115",
+      "line": "IR115",
+      "schedule": [
+        { "station": "Brigue", "arr": null, "dep": "6:15", "Voie": null },
+        { "station": "Vescovade", "arr": "6:30", "dep": null, "Voie": null }
+      ]
+    },
+    {
+      "id": "IR116",
+      "line": "IR116",
+      "schedule": [
+        { "station": "Vescovade", "arr": null, "dep": "21:05", "Voie": null },
+        { "station": "Brigue", "arr": "21:20", "dep": null, "Voie": null }
+      ]
+    },
+    {
+      "id": "IR117",
+      "line": "IR117",
+      "schedule": [
+        { "station": "Brigue", "arr": null, "dep": "17:05", "Voie": null },
+        { "station": "Vescovade", "arr": "17:20", "dep": null, "Voie": null }
+      ]
+    },
+    {
+      "id": "IR118",
+      "line": "IR118",
+      "schedule": [
+        { "station": "Vescovade", "arr": null, "dep": "21:40", "Voie": null },
+        { "station": "Brigue", "arr": "21:55", "dep": null, "Voie": null }
+      ]
+    },
+    {
+      "id": "IR119",
+      "line": "IR119",
+      "schedule": [
+        { "station": "Brigue", "arr": null, "dep": "20:00", "Voie": null },
+        { "station": "Vescovade", "arr": "20:15", "dep": null, "Voie": null }
+      ]
+    },
+    {
+      "id": "IR120",
+      "line": "IR120",
+      "schedule": [
+        { "station": "Vescovade", "arr": null, "dep": "22:30", "Voie": null },
+        { "station": "Brigue", "arr": "22:45", "dep": null, "Voie": null }
+      ]
+    },
+    {
       "id": "IR121",
       "line": "IR121",
       "schedule": [
