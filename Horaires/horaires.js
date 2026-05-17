@@ -301,6 +301,29 @@ function serviceClassSuffix(code){
   return "";
 }
 
+function renderLineTagHTML(lineTag){
+  const parts = String(lineTag || "")
+    .split("→")
+    .map(part => part.trim())
+    .filter(Boolean);
+
+  const partSuffixes = parts.map(part => serviceClassSuffix(part));
+
+  if(parts.length > 1){
+    const segments = parts.map((part, idx)=>{
+      const suffix = partSuffixes[idx];
+      const segmentClass = `lineTag__segment lineTag__segment--${suffix || "default"}`;
+      return `<span class="${segmentClass}"><span class="lineTag__text">${escapeHtml(part)}</span></span>`;
+    }).join("");
+
+    return `<span class="lineTag lineTag--multi" aria-label="${escapeHtml(lineTag)}">${segments}</span>`;
+  }
+
+  const tagSuffix = serviceClassSuffix(lineTag);
+  const lineTagClass = `lineTag${tagSuffix ? ` lineTag--${tagSuffix}` : ""}`;
+  return `<span class="${lineTagClass}">${escapeHtml(lineTag)}</span>`;
+}
+
 const PARIS_TZ = "Europe/Paris";
 
 function parisNowParts(date = new Date()){
@@ -1720,8 +1743,6 @@ function renderTripCardHTML(t, idx){
     : (Array.isArray(t.legs)
         ? t.legs.map(l => l.route?.line || "").filter(Boolean).join(" → ")
         : `${t.leg1?.route?.line || ""} → ${t.leg2?.route?.line || ""}`);
-  const tagSuffix = serviceClassSuffix(lineTag);
-  const lineTagClass = `lineTag${tagSuffix ? ` lineTag--${tagSuffix}` : ""}`;
 
   return `
     <article class="trip"
@@ -1729,7 +1750,7 @@ function renderTripCardHTML(t, idx){
              data-depsec="${depSec ?? ""}"
              data-arrsec="${arrSec ?? ""}">
       <header class="trip__head">
-        <span class="${lineTagClass}">${escapeHtml(lineTag)}</span>
+        ${renderLineTagHTML(lineTag)}
         <span class="trip__title">${escapeHtml(title)}</span>
         <span class="trip__subtitle">${escapeHtml(subtitle)}</span>
       </header>
