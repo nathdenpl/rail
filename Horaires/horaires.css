@@ -258,6 +258,102 @@ input:focus{
   border-color:#5483b3;
 }
 
+.lineTag--multi{
+  --tagSkew:7px;
+  --tagSkewPad:4px;
+  display:inline-flex;
+  align-items:center;
+  gap:0;
+  padding:0;
+  border:none;
+  color:inherit;
+  background:transparent;
+}
+
+.lineTag__segment{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  position:relative;
+  min-height:32px;
+  padding:4px 10px;
+  font-weight:inherit;
+  white-space:nowrap;
+  border:0;
+  overflow:hidden;
+}
+
+.lineTag--multi .lineTag__segment + .lineTag__segment{
+  margin-left:calc(var(--tagSkew) * -1 + 3px);
+}
+
+.lineTag__text{
+  display:inline-block;
+  position:relative;
+  z-index:1;
+}
+
+.lineTag__segment--ir{
+  background:#d92828;
+  color:#fff;
+}
+
+.lineTag__segment--ic{
+  background:#3d619b;
+  color:#fff;
+}
+
+.lineTag__segment--re{
+  color:#5483b3;
+  background:#5483b3;
+}
+
+.lineTag__segment--re::before{
+  content:"";
+  position:absolute;
+  inset:2px;
+  background:#fff;
+  z-index:0;
+}
+
+.lineTag--multi .lineTag__segment:first-child{
+  padding-right:calc(10px + var(--tagSkewPad));
+  border-radius:6px 0 0 6px;
+  clip-path:polygon(0 0, 100% 0, calc(100% - var(--tagSkew)) 100%, 0 100%);
+}
+
+.lineTag--multi .lineTag__segment:last-child{
+  padding-left:calc(10px + var(--tagSkewPad));
+  border-radius:0 6px 6px 0;
+  clip-path:polygon(var(--tagSkew) 0, 100% 0, 100% 100%, 0 100%);
+}
+
+.lineTag--multi .lineTag__segment:not(:first-child):not(:last-child){
+  padding-left:calc(10px + var(--tagSkewPad));
+  padding-right:calc(10px + var(--tagSkewPad));
+  clip-path:polygon(var(--tagSkew) 0, 100% 0, calc(100% - var(--tagSkew)) 100%, 0 100%);
+}
+
+.lineTag--multi .lineTag__segment:first-child::before{
+  border-radius:4px 0 0 4px;
+  clip-path:polygon(0 0, 100% 0, calc(100% - var(--tagSkew)) 100%, 0 100%);
+}
+
+.lineTag--multi .lineTag__segment:last-child::before{
+  border-radius:0 4px 4px 0;
+  clip-path:polygon(var(--tagSkew) 0, 100% 0, 100% 100%, 0 100%);
+}
+
+.lineTag--multi .lineTag__segment:not(:first-child):not(:last-child)::before{
+  clip-path:polygon(var(--tagSkew) 0, 100% 0, calc(100% - var(--tagSkew)) 100%, 0 100%);
+}
+
+.lineTag__segment--default{
+  background:#f8fafc;
+  color:#0f172a;
+  border:1px solid rgba(15,23,42,.08);
+}
+
 .trip__title{
   font-size:18px;
   font-weight:900;
