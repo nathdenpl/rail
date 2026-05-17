@@ -4,6 +4,9 @@
             "name": "Able"
         },
         {
+            "name": "Aigle"
+        },
+        {
             "name": "Allèse"
         },
         {
@@ -14,6 +17,9 @@
         },
         {
             "name": "Belle-Napolie"
+        },
+        {
+            "name": "Bex"
         },
         {
             "name": "Bourg-en-Napolie"
@@ -44,6 +50,9 @@
         },
         {
             "name": "Châtillon-sur-Rhône"
+        },
+        {
+            "name": "Chillon"
         },
         {
             "name": "Clages"
@@ -103,6 +112,9 @@
             "name": "Montres Renart"
         },
         {
+            "name": "Montreux"
+        },
+        {
             "name": "Nus"
         },
         {
@@ -121,10 +133,13 @@
             "name": "Raron"
         },
         {
+            "name": "Rêtre"
+        },
+        {
             "name": "Riddes"
         },
         {
-            "name": "Rêtre"
+            "name": "Roche"
         },
         {
             "name": "Saint-Léonard"
@@ -148,6 +163,9 @@
             "name": "Sursée"
         },
         {
+            "name": "Territet"
+        },
+        {
             "name": "Troisfontaines"
         },
         {
@@ -158,6 +176,9 @@
         },
         {
             "name": "Viège"
+        },
+        {
+            "name": "Villeneuve"
         }
     ]
 }
