@@ -228,9 +228,17 @@ function initHeaderMenu(){
 }
 
 async function loadRoutes(){
-  const res = await fetch("../routes.json", { cache:"no-store" });
-  if(!res.ok) throw new Error("Impossible de charger routes.json");
-  const data = await res.json();
+  const [routesRes, garesRes] = await Promise.all([
+    fetch("../routes.json", { cache:"no-store" }),
+    fetch("../gares.json", { cache:"no-store" })
+  ]);
+
+  if(!routesRes.ok) throw new Error("Impossible de charger routes.json");
+  if(!garesRes.ok) throw new Error("Impossible de charger gares.json");
+
+  const data = await routesRes.json();
+  const garesData = await garesRes.json();
+
   routesAll = (Array.isArray(data.routes) ? data.routes : []).map(r => ({
     id: String(r.id || ""),
     line: String(r.line || ""),
@@ -241,16 +249,17 @@ async function loadRoutes(){
       voie: (s.Voie ?? s.voie) == null || (s.Voie ?? s.voie) === "" ? null : String(s.Voie ?? s.voie)
     })) : []
   }));
+
   routes = routesAll.slice();
 
-  const allStations = [];
-  for(const r of routes){
-    for(const s of r.schedule){
-      if(s.station) allStations.push(s.station);
-    }
-  }
-  stationsAll = uniqueCaseInsensitive(allStations)
-    .sort((a,b)=>a.localeCompare(b, "fr", { sensitivity:"base" }));
+  const garesList = Array.isArray(garesData?.gares) ? garesData.gares : [];
+
+  stationsAll = uniqueCaseInsensitive(
+    garesList
+      .map(g => String(g?.name ?? g ?? "").trim())
+      .filter(Boolean)
+  ).sort((a,b)=>a.localeCompare(b, "fr", { sensitivity:"base" }));
+
   stationsIndex = stationsAll.map(name=>{
     const key = normalizeStationQuery(name);
     return { name, key, compact: compactKey(key), abbrevCompact: stationAbbrevCompact(key) };
