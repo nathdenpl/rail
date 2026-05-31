@@ -51,7 +51,7 @@ body{
   margin:0;
   background:var(--bg);
   color:var(--text);
-  font-family:"Suisse", system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+  font-family:"Arial", system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
 }
 
 input, button, select, option{
